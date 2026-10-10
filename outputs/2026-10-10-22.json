@@ -1,0 +1,72 @@
+[
+  {
+    "term": "kalen deboer",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "note": "7天基线热度: 4.0, 24h峰值: 100 (确认突然冒头)；相关事件: Top five holds, Alabama rises in latest AP Top 25 college football rankings"
+  },
+  {
+    "term": "jon husted",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "other",
+    "note": "7天基线热度: 13.0, 24h峰值: 100 (确认突然冒头)；相关事件: Sen. Jon Husted (R-OH) Delivers Remarks at Fall Festival"
+  },
+  {
+    "term": "john husted",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "note": "7天曲线校验跳过(TooManyRequestsError)，依赖24h榜单确认；相关事件: Opinion: Why Sherrod Brown remains a champion for Ohio workers"
+  },
+  {
+    "term": "bob chesney",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "info",
+    "note": "7天曲线校验跳过(TooManyRequestsError)，依赖24h榜单确认；相关事件: How Bob Chesney has completely turned around UCLA"
+  },
+  {
+    "term": "pat narduzzi",
+    "source": "google_trends",
+    "heat": "1000+",
+    "intent": "info",
+    "note": "7天基线热度: 0.8, 24h峰值: 100 (确认突然冒头)；相关事件: Pitt players respect Bill Belichick’s resume but remain focused on beating North Carolina"
+  },
+  {
+    "term": "east bolivia",
+    "source": "reddit",
+    "heat": 2,
+    "intent": "other",
+    "note": "Reddit社区上升热帖高频词，原帖: \"[Critical Scenario] Help to stabilize our [Censored by New E...\""
+  },
+  {
+    "term": "bolivia union",
+    "source": "reddit",
+    "heat": 2,
+    "intent": "other",
+    "note": "Reddit社区上升热帖高频词，原帖: \"[Critical Scenario] Help to stabilize our [Censored by New E...\""
+  },
+  {
+    "term": "east bolivia union",
+    "source": "reddit",
+    "heat": 2,
+    "intent": "other",
+    "note": "Reddit社区上升热帖高频词，原帖: \"[Critical Scenario] Help to stabilize our [Censored by New E...\""
+  },
+  {
+    "term": "saraki lake",
+    "source": "reddit",
+    "heat": 1,
+    "intent": "other",
+    "note": "Reddit社区上升热帖高频词，原帖: \"Anyone at Saraki lake, puttenahalli lake??...\""
+  },
+  {
+    "term": "lake puttenahalli",
+    "source": "reddit",
+    "heat": 1,
+    "intent": "other",
+    "note": "Reddit社区上升热帖高频词，原帖: \"Anyone at Saraki lake, puttenahalli lake??...\""
+  }
+]
