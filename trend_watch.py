@@ -364,6 +364,162 @@ def classify_intent(term: str, context: str = '') -> str:
     return 'other'
 
 
+# ---------------------------------------------------------------------------
+# 改动1 & 改动2: 商业价值打分与事件类型标记规则
+# ---------------------------------------------------------------------------
+
+HIGH_VALUE_EN = [
+    'best', 'vs', 'how to', 'price', 'review', 'alternative', 'comparison',
+    'buy', 'deal', 'discount', 'coupon', 'free trial', 'sign up', 'login',
+    'tutorial', 'top 10', 'cheapest', 'promo code', 'pricing'
+]
+
+HIGH_VALUE_ZH = [
+    '价格', '对比', '评测', '测评', '教程', '购买', '优惠', '攻略', '哪个', '怎么样', '值得买'
+]
+
+HIGH_VALUE_EN_PATTERNS = [
+    re.compile(r'\b' + re.escape(w) + r'\b', re.I) for w in HIGH_VALUE_EN
+]
+
+# 事件类型正则：product_launch
+PRODUCT_LAUNCH_PATTERN = re.compile(
+    r'\b(launch(?:es|ed)?|release(?:d|s)?|announce(?:ments?|s|d)?|unveil(?:ed|s)?|'
+    r'debut(?:ed|s)?|rollout|shipping|pre-?order|keynote)\b|'
+    r'(发布|推出|上线|上市|首发|新品)',
+    re.I
+)
+
+# 事件类型正则：policy
+POLICY_PATTERN = re.compile(
+    r'\b(polic(?:y|ies)?|regulations?|ban(?:ned|s)?|laws?|bills?|'
+    r'rule\s+changes?|executive\s+orders?|legislation|tariffs?)\b|'
+    r'(禁令|政策|新规|法规|关税|制裁)',
+    re.I
+)
+
+# 事件类型正则：gossip 额外信号（结合 GOSSIP_PATTERNS 使用）
+EXTRA_GOSSIP_PATTERNS = re.compile(
+    r'\b(celebrity|rumor|rumors|scandal|dating)\b|'
+    r'(八卦|恋情|绯闻|出轨)',
+    re.I
+)
+
+EVENT_TYPE_PRIORITY = {
+    'product_launch': 0,
+    'policy': 1,
+    'gossip': 2,
+    None: 3
+}
+
+
+def score_commercial(term: str, context: str = '', intent: str = None) -> int:
+    """计算商业价值分 commercial_score (0-10 整数)
+    - 高价值信号词匹配：term 中出现 +2，仅在 context 中出现 +1
+    - 工具型意图 (intent==tool) 额外 +3；资讯型 +1
+    - 纯吃瓜/纯人名相关 (GOSSIP_PATTERNS 或 is_person_name) 减 3，最低 0
+    - 最终分数钳制到 0-10
+    """
+    if intent is None:
+        intent = classify_intent(term, context)
+
+    score = 0
+    term_lower = term.lower()
+    context_lower = context.lower()
+
+    # 1. 高价值英文词匹配
+    for pat in HIGH_VALUE_EN_PATTERNS:
+        if pat.search(term_lower):
+            score += 2
+        elif pat.search(context_lower):
+            score += 1
+
+    # 2. 高价值中文词匹配
+    for zh_kw in HIGH_VALUE_ZH:
+        if zh_kw in term_lower:
+            score += 2
+        elif zh_kw in context_lower:
+            score += 1
+
+    # 3. 意图加分
+    if intent == 'tool':
+        score += 3
+    elif intent == 'info':
+        score += 1
+
+    # 4. 吃瓜/人名低分惩罚
+    combined = f"{term} {context}"
+    if GOSSIP_PATTERNS.search(combined) or is_person_name(term, context):
+        score -= 3
+
+    # 5. 钳制到 0-10
+    return max(0, min(10, score))
+
+
+def classify_event_type(term: str, context: str = '') -> str:
+    """根据 term 与 context 标记事件类型 ('product_launch' | 'policy' | 'gossip' | None)
+    优先级: product_launch > policy > gossip；都没命中则返回 None
+    """
+    combined = f"{term} {context}"
+    if PRODUCT_LAUNCH_PATTERN.search(combined):
+        return 'product_launch'
+    if POLICY_PATTERN.search(combined):
+        return 'policy'
+    if GOSSIP_PATTERNS.search(combined) or EXTRA_GOSSIP_PATTERNS.search(combined):
+        return 'gossip'
+    return None
+
+
+def parse_heat(heat) -> int:
+    """提取数字部分转 int（'500+'→500，'N/A'/无效→0）"""
+    if heat is None:
+        return 0
+    if isinstance(heat, (int, float)):
+        return int(heat)
+    s = str(heat).strip().replace(',', '')
+    m = re.search(r'\d+', s)
+    if m:
+        try:
+            return int(m.group(0))
+        except ValueError:
+            return 0
+    return 0
+
+
+def get_sort_key(item: dict) -> tuple:
+    """排序键：按 (event_type 优先级升序, commercial_score 降序, heat 降序)"""
+    ev_type = item.get('event_type')
+    prio = EVENT_TYPE_PRIORITY.get(ev_type, 3)
+    c_score = item.get('commercial_score', 0)
+    h_val = parse_heat(item.get('heat', 0))
+    return (prio, -c_score, -h_val)
+
+
+def load_seen_terms(path: str) -> dict:
+    """加载已推送历史词库"""
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            print(f"[去重] 读取 seen_terms.json 失败: {e}，将初始化为空字典")
+    return {}
+
+
+def save_seen_terms(path: str, data: dict):
+    """保存已推送历史词库"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def should_skip(term: str, seen: dict) -> bool:
+    """检查词是否已在推送历史中"""
+    return term.strip().lower() in seen
+
+
 def check_candidate(term: str, context: str = '') -> tuple:
     """候选词过滤规则检查，返回 (是否合格: bool, 过滤原因: str)"""
     clean_term = term.strip().lower()
@@ -494,11 +650,15 @@ def fetch_google_trends():
             reason_parts.append("24小时内搜索量大幅异动")
 
         intent = classify_intent(term, context)
+        commercial_score = score_commercial(term, context, intent=intent)
+        event_type = classify_event_type(term, context)
         results.append({
             "term": term,
             "source": "google_trends",
             "heat": traffic,
             "intent": intent,
+            "commercial_score": commercial_score,
+            "event_type": event_type,
             "note": "；".join(reason_parts)
         })
 
@@ -605,11 +765,16 @@ def fetch_reddit_rising():
         if intent == 'other' and len(phrase.split()) < 2:
             continue
 
+        commercial_score = score_commercial(phrase, sample_title, intent=intent)
+        event_type = classify_event_type(phrase, sample_title)
+
         results.append({
             "term": phrase,
             "source": "reddit",
             "heat": score,
             "intent": intent,
+            "commercial_score": commercial_score,
+            "event_type": event_type,
             "note": f"Reddit社区上升热帖高频词，原帖: \"{sample_title[:60]}...\""
         })
         if len(results) >= 5:
@@ -659,21 +824,48 @@ def main():
     # 确定输出文件路径（按北京时间 UTC+8 命名：YYYY-MM-DD-HH.json）
     beijing_tz = timezone(timedelta(hours=8))
     now_bj = datetime.now(timezone.utc).astimezone(beijing_tz)
+    now_bj_iso = now_bj.isoformat()
     file_name = now_bj.strftime("%Y-%m-%d-%H.json")
 
     output_dir = os.path.expanduser("~/workspace/trend-monitor/outputs")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, file_name)
+    seen_path = os.path.join(output_dir, "seen_terms.json")
+
+    # 改动4: 已处理词去重
+    seen = load_seen_terms(seen_path)
+    output_candidates = []
+
+    for item in all_candidates:
+        term = item.get('term', '')
+        if should_skip(term, seen):
+            print(f"[去重] 跳过已推送词: {term}")
+            continue
+
+        term_lower = term.strip().lower()
+        output_candidates.append(item)
+        prev_count = seen.get(term_lower, {}).get('count', 0)
+        seen[term_lower] = {
+            'first_seen': seen.get(term_lower, {}).get('first_seen', now_bj_iso),
+            'count': prev_count + 1
+        }
+
+    # 改动3: 按 (event_type 优先级, commercial_score, heat) 综合排序
+    output_candidates.sort(key=get_sort_key)
 
     # 写入 JSON 文件
     with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(all_candidates, f, ensure_ascii=False, indent=2)
+        json.dump(output_candidates, f, ensure_ascii=False, indent=2)
+
+    # 保存 seen_terms.json
+    save_seen_terms(seen_path, seen)
 
     print(f"\n=== 监控完成 ===")
-    print(f"有效候选新词总数: {len(all_candidates)}")
+    print(f"有效候选新词总数: {len(output_candidates)}")
     print(f"输出文件路径: {output_path}")
+    print(f"去重库路径: {seen_path}")
     print("\n--- 结果预览 ---")
-    print(json.dumps(all_candidates, ensure_ascii=False, indent=2))
+    print(json.dumps(output_candidates, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

@@ -1,23 +1,56 @@
 [
   {
-    "term": "georgia tech football",
+    "term": "dr stone terraforming",
     "source": "google_trends",
-    "heat": "500+",
+    "heat": "200+",
     "intent": "info",
-    "note": "7天基线热度: 23.2, 24h峰值: 99 (确认突然冒头)；相关事件: Weather Updates for Saturday’s Georgia Tech-Duke Football Game"
+    "commercial_score": 1,
+    "event_type": "product_launch",
+    "note": "7天基线热度: 0.0, 24h峰值: 100 (确认突然冒头)；相关事件: Dr. Stone TV Anime Gets Terraforming Sequel"
   },
   {
-    "term": "arizona vs west virginia",
+    "term": "ball state vs northwestern",
+    "source": "google_trends",
+    "heat": "1000+",
+    "intent": "info",
+    "commercial_score": 4,
+    "event_type": null,
+    "note": "7天基线热度: 0.1, 24h峰值: 100 (确认突然冒头)；相关事件: Northwestern vs. Ball State: How to Watch, Odds and Injury Report"
+  },
+  {
+    "term": "man utd vs spurs",
+    "source": "google_trends",
+    "heat": "20000+",
+    "intent": "info",
+    "commercial_score": 3,
+    "event_type": null,
+    "note": "7天基线热度: 0.0, 24h峰值: 100 (确认突然冒头)；相关事件: Team news for United v Spurs"
+  },
+  {
+    "term": "harry kane",
     "source": "google_trends",
     "heat": "500+",
     "intent": "info",
-    "note": "7天基线热度: 0.3, 24h峰值: 100 (确认突然冒头)；相关事件: Arizona Continues Big 12 Play at West Virginia - University of Arizona Athletics"
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 18.9, 24h峰值: 58 (确认突然冒头)；相关事件: Bayern Munich chief gives Harry Kane contract update as German giants move to secure England captain's future until 2029"
+  },
+  {
+    "term": "embezzlement",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 36.7, 24h峰值: 100 (确认突然冒头)；相关事件: Three more Odisha govt employees held for ‘misappropriation’ of over 9 cr public funds"
   },
   {
     "term": "east bolivia",
     "source": "reddit",
     "heat": 2,
     "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
     "note": "Reddit社区上升热帖高频词，原帖: \"[Critical Scenario] Help to stabilize our [Censored by New E...\""
   },
   {
@@ -25,6 +58,8 @@
     "source": "reddit",
     "heat": 2,
     "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
     "note": "Reddit社区上升热帖高频词，原帖: \"[Critical Scenario] Help to stabilize our [Censored by New E...\""
   },
   {
@@ -32,6 +67,8 @@
     "source": "reddit",
     "heat": 2,
     "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
     "note": "Reddit社区上升热帖高频词，原帖: \"[Critical Scenario] Help to stabilize our [Censored by New E...\""
   },
   {
@@ -39,6 +76,8 @@
     "source": "reddit",
     "heat": 1,
     "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
     "note": "Reddit社区上升热帖高频词，原帖: \"Anyone at Saraki lake, puttenahalli lake??...\""
   },
   {
@@ -46,6 +85,8 @@
     "source": "reddit",
     "heat": 1,
     "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
     "note": "Reddit社区上升热帖高频词，原帖: \"Anyone at Saraki lake, puttenahalli lake??...\""
   }
 ]

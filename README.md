@@ -60,25 +60,47 @@ python3 ~/workspace/trend-monitor/trend_watch.py
 | `source` | string | 数据源（`google_trends` 或 `reddit`） |
 | `heat` | string / int | 热度指标（Google 为近似搜索量如 `500+`、`1000+`；Reddit 为综合频次打分） |
 | `intent` | string | 搜索意图分类：`tool`（工具型）、`info`（资讯型）、`other`（其他） |
+| `commercial_score` | int | 商业价值分（0-10）：基于高价值信号词、意图加权（工具型+3/资讯型+1）及八卦人名惩罚综合计算 |
+| `event_type` | string / null | 事件类型标记：`product_launch`（新品/发布）、`policy`（政策/新规）、`gossip`（八卦/绯闻）或 `null` |
 | `note` | string | 飙升原因推测、7天基线与峰值对比、相关新闻事件或 Reddit 原帖标题 |
+
+### 输出排序规则
+
+JSON 数组写入前按 `(event_type 优先级, commercial_score, heat)` 综合排序：
+1. **事件类型优先级（升序）**：`product_launch` (0) > `policy` (1) > `gossip` (2) > `null` (3)。
+2. **商业价值分（降序）**：`commercial_score` 高分优先。
+3. **热度数值（降序）**：解析 `heat` 数字部分转为整型（如 `'500+'` → `500`，`'N/A'` → `0`）后降序排列。
+
+### 已处理词去重机制
+
+- **历史词库文件**：`~/workspace/trend-monitor/outputs/seen_terms.json`。
+- **存储结构**：`{term_lower: {"first_seen": "ISO8601时间", "count": 推送次数}}`。
+- **去重逻辑**：
+  - 启动时加载 `seen_terms.json`。
+  - 遍历抓取候选词，若小写词已存在于历史库中，则记录日志 `[去重] 跳过已推送词: xxx` 并从本次输出中排除。
+  - 未推送过的新词加入本次输出结果，并在历史库中记录北京时间（UTC+8）ISO8601 时间戳及更新累计出现次数，监控流程结束后统一保存回磁盘。
 
 ### 示例输出：
 
 ```json
 [
   {
-    "term": "georgia tech football",
-    "source": "google_trends",
-    "heat": "500+",
-    "intent": "info",
-    "note": "7天基线热度: 12.3, 24h峰值: 100 (确认突然冒头)；相关事件: Georgia Tech secures upset win in college football"
-  },
-  {
     "term": "pdf converter online free",
     "source": "google_trends",
     "heat": "200+",
     "intent": "tool",
+    "commercial_score": 6,
+    "event_type": "product_launch",
     "note": "24小时内搜索量大幅异动；相关事件: New PDF tool launch"
+  },
+  {
+    "term": "georgia tech football",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 12.3, 24h峰值: 100 (确认突然冒头)；相关事件: Georgia Tech secures upset win in college football"
   }
 ]
 ```
