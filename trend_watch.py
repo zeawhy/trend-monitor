@@ -5,12 +5,17 @@ trend_watch.py - 新词监控脚本，用于发现刚冒头的搜索新词。
     python3 trend_watch.py
 
 功能:
-    1. Google Trends（主数据源）：抓取美国区（US）trending searches，获取24小时内热度飙升词；
-       并对 top 候选词通过 interest_over_time 验证过去 7 天热度曲线，确认是'突然冒头'而非'长期热词'。
-    2. Reddit rising（辅助）：抓取 r/all/rising 帖子标题，提取 2-4 词关键词短语。
-    3. X (Twitter) 趋势：无公开免费 API，标记为 TODO 跳过。
-    4. 过滤与分类：过滤纯人名八卦与无明确意图词，保留工具型（tool）或资讯型（info）意图的词。
-    5. 输出：生成 ~/workspace/trend-monitor/outputs/YYYY-MM-DD-HH.json（北京时间命名）。
+    1. GitHub breakout（发现源）：抓取创建不足 14 天、日均涨星 200+ 或总星 400+ 的新仓库，
+       仓库名即产品/技术新词。
+    2. HuggingFace 趋势模型（发现源）：用 huggingface_hub 公开免费 API 抓取 trending models（按 likes/downloads 排序，取最近 7 天发布/更新），提取 2-4 词关键词短语。
+    3. Reddit rising（发现源）：抓取 r/all/rising 帖子标题，提取 2-4 词关键词短语。
+    4. X (Twitter) 趋势（发现源）：优先尝试 Nitter 公开实例与社交搜索降级抓取过去 8 小时高互动推文，提取产品名和技术名词；失败时静默跳过。
+    5. Google Trends（仅验证源，不做发现）：14 天命中率核验时用 Trends 查词的持续热度；
+       注意丢弃最近 2 天未结算数据，避免 0→100 假峰值误判。
+    6. 过滤与分类：过滤纯人名八卦与无明确意图词，保留工具型（tool）或资讯型（info）意图的词。
+    7. 命中率追踪：将新发现词写入 hidden_files/word_tracking.json；通过 check_hit_rate() 对 14 天前的词用 Google Trends 核验热度翻倍情况并输出报告。
+    8. Jev 打分层：用 TypeSafe Jev 结构化决策模型（经 OpenCode Zen 免费通道）给 top 候选词打三维分（是否产品/技术名、商业意图、新词价值），失败不阻塞。
+    9. 输出：生成 ~/workspace/trend-monitor/outputs/YYYY-MM-DD-HH.json（北京时间命名）。
 """
 
 import os
@@ -29,6 +34,7 @@ os.environ['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 import requests
 import pandas as pd
 from pytrends.request import TrendReq
+from huggingface_hub import HfApi
 
 # ---------------------------------------------------------------------------
 # Monkey-patch pytrends TrendReq 以适应 Google Trends 最新的 API 变动
@@ -553,117 +559,101 @@ def is_valid_candidate(term: str, context: str = '') -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 数据源 1: Google Trends
+# Jev 打分层 (经 OpenCode Zen 免费通道)
+# 用 TypeSafe Jev 结构化决策模型给候选词打三维分:
+#   is_product_tech (noul): 是否具体产品/技术名
+#   commercial_intent (choice): paid_tool / tech_term / company / generic
+#   newsworthiness (score 0-1): 建站价值
+# 注意:
+#   - 走 https://opencode.ai/zen/v1/systemone, 用匿名 public key (2026-10-11 实测可用)
+#   - OpenCode 会拦 Python-urllib 默认 UA, 必须伪装 User-Agent
+#   - 失败时静默返回 None, 绝不阻塞主流程
 # ---------------------------------------------------------------------------
-def fetch_google_trends():
-    """抓取美国区（US）trending searches，并通过 interest_over_time 验证突发性"""
-    results = []
-    print("[Google Trends] 开始抓取 US trending searches...")
+JEV_ENDPOINT = "https://opencode.ai/zen/v1/systemone"
+JEV_MODEL = "jev-1.13-free"
+JEV_MAX_SCORE_PER_RUN = 15  # 每轮最多打分词数, 控制耗时
 
-    raw_trends = []
-    # 优先尝试 pytrends.trending_searches，若端点变动失败则通过官方 RSS 兜底
-    pt = TrendReq(hl='en-US', tz=360)
+
+def score_with_jev(term: str, timeout: float = 30.0) -> dict | None:
+    """用 Jev 给单个候选词打分, 失败返回 None(调用方直接跳过)。"""
+    import urllib.request
+
+    payload = {
+        "model": JEV_MODEL,
+        "state": term,
+        "questions": {
+            "is_product_tech": {
+                "type": "noul",
+                "instructions": (
+                    "Is this term a specific product name, technology, tool, "
+                    "framework, model, or company — rather than a generic word "
+                    "or common phrase? Answer yes only if it names something concrete."
+                ),
+            },
+            "intent": {
+                "type": "choice",
+                "instructions": "What is the commercial nature of this term?",
+                "criteria": {
+                    "paid_tool": "A specific tool, SaaS, app, or service users would pay for or sign up to use",
+                    "tech_term": "A technical concept, framework, model, or standard with no direct paid product",
+                    "company": "A company or organization name",
+                    "generic": "A generic word, meme, event, or phrase with no clear commercial angle",
+                },
+            },
+            "newsworthiness": {
+                "type": "score",
+                "instructions": (
+                    "How valuable is this as a 'new trending keyword' for building "
+                    "a niche tool/information site around? Consider: novelty, "
+                    "search-intent clarity, low-competition potential."
+                ),
+                "criteria": ["Low", "Medium", "High", "Exceptional"],
+            },
+        },
+    }
     try:
-        df = pt.trending_searches(pn='united_states')
-        for item in df[0].tolist():
-            raw_trends.append({'term': str(item), 'traffic': 'N/A', 'news': []})
-        print(f"[Google Trends] 通过 pytrends.trending_searches 获取到 {len(raw_trends)} 个词")
+        req = urllib.request.Request(
+            JEV_ENDPOINT,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer public",
+                "User-Agent": "curl/8.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        answers = data.get("answers", {})
+        is_pt = answers.get("is_product_tech", {})
+        intent = answers.get("intent", {})
+        news = answers.get("newsworthiness", {})
+        return {
+            "is_product_tech": is_pt.get("noul"),
+            "intent": intent.get("choice"),
+            "intent_confidence": intent.get("confidence"),
+            "newsworthiness": news.get("score"),
+        }
     except Exception as e:
-        print(f"[Google Trends] pytrends.trending_searches 暂不可用 ({e})，使用 Google Trends 官方 RSS 源...")
-        try:
-            r = requests.get('https://trends.google.com/trending/rss?geo=US', timeout=15)
-            r.raise_for_status()
-            root = ET.fromstring(r.content)
-            ns = {'ht': 'https://trends.google.com/trending/rss'}
-            for item in root.findall('.//item'):
-                title = item.find('title').text if item.find('title') is not None else ''
-                traffic = item.find('ht:approx_traffic', ns)
-                traffic_text = traffic.text if traffic is not None else 'N/A'
-                news_items = [
-                    n.find('ht:news_item_title', ns).text
-                    for n in item.findall('ht:news_item', ns)
-                    if n.find('ht:news_item_title', ns) is not None and n.find('ht:news_item_title', ns).text
-                ]
-                raw_trends.append({
-                    'term': title,
-                    'traffic': traffic_text,
-                    'news': news_items
-                })
-            print(f"[Google Trends] 通过官方 RSS 获取到 {len(raw_trends)} 个趋势词")
-        except Exception as rss_err:
-            print(f"[Google Trends] 抓取 RSS 失败: {rss_err}")
-            return results
+        print(f"[Jev] 打分失败({term}): {e}")
+        return None
 
-    # 对候选词进行初筛
-    candidates = []
-    for t in raw_trends:
-        term = t['term']
-        context = ' '.join(t['news'])
-        valid, reason = check_candidate(term, context)
-        if valid:
-            candidates.append(t)
-        else:
-            print(f"[Google Trends] 过滤掉{reason}: {term}")
 
-    # 对前 5 个候选词使用 pytrends.interest_over_time 验证过去 7 天曲线，确认是否为'突然冒头'
-    top_candidates = candidates[:5]
-    for idx, item in enumerate(top_candidates):
-        term = item['term']
-        traffic = item['traffic']
-        news = item['news']
-        context = ' '.join(news)
+def enrich_with_jev(candidates: list) -> list:
+    """给候选词批量加 Jev 打分, 失败/超限的词保留原样不阻塞。
 
-        curve_note = ""
-
-        try:
-            time.sleep(1.2)  # 避免触发 Google 429 限流
-            pt_check = TrendReq(hl='en-US', tz=360)
-            pt_check.build_payload([term], timeframe='now 7-d', geo='US')
-            iot_df = pt_check.interest_over_time()
-
-            if not iot_df.empty and term in iot_df.columns:
-                series = iot_df[term].tolist()
-                if len(series) >= 24:
-                    baseline = sum(series[:-24]) / max(len(series[:-24]), 1)
-                    recent_peak = max(series[-24:])
-                    
-                    # 判断是否为长期高热度词（基线很高且无明显相对飙升）
-                    if baseline >= 45 and recent_peak <= baseline * 1.5:
-                        print(f"[Google Trends] {term} 过去7天基线高 ({baseline:.1f})，属长期热词，跳过")
-                        continue
-                    else:
-                        curve_note = f"7天基线热度: {baseline:.1f}, 24h峰值: {recent_peak} (确认突然冒头)"
-                else:
-                    curve_note = "7天曲线数据点较少，经24h热榜验证突发"
-            else:
-                curve_note = "7天曲线平稳无历史积累，24h内首次爆发"
-        except Exception as iot_err:
-            curve_note = f"7天曲线校验跳过({type(iot_err).__name__})，依赖24h榜单确认"
-
-        # 推测飙升原因 note
-        reason_parts = []
-        if curve_note:
-            reason_parts.append(curve_note)
-        if news:
-            reason_parts.append(f"相关事件: {news[0]}")
-        else:
-            reason_parts.append("24小时内搜索量大幅异动")
-
-        intent = classify_intent(term, context)
-        commercial_score = score_commercial(term, context, intent=intent)
-        event_type = classify_event_type(term, context)
-        results.append({
-            "term": term,
-            "source": "google_trends",
-            "heat": traffic,
-            "intent": intent,
-            "commercial_score": commercial_score,
-            "event_type": event_type,
-            "note": "；".join(reason_parts)
-        })
-
-    print(f"[Google Trends] 抓取完成，产出 {len(results)} 个合格新词")
-    return results
+    只给前 JEV_MAX_SCORE_PER_RUN 个词打分(按现有排序), 控制单轮耗时。
+    """
+    for item in candidates[:JEV_MAX_SCORE_PER_RUN]:
+        term = item.get("term", "")
+        if not term:
+            continue
+        jev = score_with_jev(term)
+        if jev:
+            item["jev"] = jev
+            print(f"[Jev] {term}: intent={jev['intent']} news={jev['newsworthiness']:.2f}")
+        time.sleep(1)  # 免费池限流, 礼貌间隔
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -785,12 +775,569 @@ def fetch_reddit_rising():
 
 
 # ---------------------------------------------------------------------------
-# 数据源 3: X 趋势 (TODO)
+# 数据源 3: HuggingFace 趋势模型 (Hugging Face Hub API)
+# ---------------------------------------------------------------------------
+def fetch_huggingface_trending():
+    """抓取 Hugging Face trending models（按 likes/downloads 排序，取最近 7 天发布/更新的模型）。
+    从模型名和简介提取 2-4 词关键词短语，跟现有 Reddit 关键词提取逻辑保持一致。
+    """
+    results = []
+    print("[HuggingFace] 开始抓取最近 7 天 trending models...")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    api = HfApi()
+
+    seen_ids = set()
+    all_models = []
+
+    # 按 trendingScore、likes、downloads 分别拉取候选模型，确保覆盖全面
+    for sort_key in ['trendingScore', 'likes', 'downloads']:
+        try:
+            models_batch = list(api.list_models(
+                sort=sort_key,
+                limit=35,
+                expand=['lastModified', 'createdAt', 'likes', 'downloads', 'cardData']
+            ))
+            for m in models_batch:
+                if m.id not in seen_ids:
+                    seen_ids.add(m.id)
+                    all_models.append(m)
+        except Exception as e:
+            print(f"[HuggingFace] 获取 sort={sort_key} 模型批次失败: {e}")
+
+    if not all_models:
+        print("[HuggingFace] 未获取到模型数据")
+        return results
+
+    # 过滤出最近 7 天发布或更新的模型
+    recent_models = []
+    for m in all_models:
+        dt = m.last_modified or m.created_at
+        if dt and dt >= cutoff:
+            recent_models.append(m)
+
+    print(f"[HuggingFace] 获取到 {len(all_models)} 个候选模型，其中最近 7 天活跃模型共 {len(recent_models)} 个")
+
+    if not recent_models:
+        return results
+
+    # 按 likes 和 downloads 综合排序（高关注/高使用优先）
+    recent_models.sort(
+        key=lambda m: max(m.likes or 0, (m.downloads or 0) // 100),
+        reverse=True
+    )
+
+    # 准备提取语料：模型名 + 简介 (description/summary) + pipeline_tag + tags
+    texts_with_scores = []
+    mid_by_text = {}
+
+    for m in recent_models:
+        likes = m.likes or 0
+        downloads = m.downloads or 0
+        # 热度打分权重综合点赞数与下载量
+        score = max(likes, downloads // 100, 1)
+
+        clean_id = m.id.split('/')[-1].replace('-', ' ').replace('_', ' ')
+        desc_parts = [clean_id]
+
+        if m.card_data:
+            cd = m.card_data.to_dict() if hasattr(m.card_data, 'to_dict') else (m.card_data if isinstance(m.card_data, dict) else {})
+            # 模型卡简介文本
+            if cd.get('description'):
+                desc_parts.append(str(cd['description']))
+            if cd.get('summary'):
+                desc_parts.append(str(cd['summary']))
+            # 任务流水线分类
+            if cd.get('pipeline_tag'):
+                desc_parts.append(str(cd['pipeline_tag']).replace('-', ' '))
+            # 标签特征词
+            if cd.get('tags') and isinstance(cd['tags'], list):
+                tags_clean = [
+                    str(t).replace('-', ' ') for t in cd['tags'][:8]
+                    if not str(t).startswith(('license:', 'region:', 'arxiv:'))
+                ]
+                desc_parts.append(' '.join(tags_clean))
+
+        text = ' '.join(desc_parts)
+        texts_with_scores.append((text, score))
+        mid_by_text[text] = m.id
+
+    # 复用与 Reddit 相同的 2-4 词关键词短语提取逻辑
+    phrase_scores, phrase_sample = extract_reddit_phrases(texts_with_scores)
+
+    # 筛选合格候选词并计算商业分与意图
+    for phrase, score in phrase_scores.most_common(30):
+        sample_text = phrase_sample.get(phrase, '')
+        valid, reason = check_candidate(phrase, sample_text)
+        if not valid:
+            print(f"[HuggingFace] 过滤掉{reason}: {phrase}")
+            continue
+
+        intent = classify_intent(phrase, sample_text)
+        # 过滤无意图的单泛词
+        if intent == 'other' and len(phrase.split()) < 2:
+            continue
+
+        commercial_score = score_commercial(phrase, sample_text, intent=intent)
+        event_type = classify_event_type(phrase, sample_text)
+        sample_mid = mid_by_text.get(sample_text, '')
+
+        results.append({
+            "term": phrase,
+            "source": "huggingface",
+            "heat": score,
+            "intent": intent,
+            "commercial_score": commercial_score,
+            "event_type": event_type,
+            "note": f"HuggingFace近7天高热模型关联词，来自模型 {sample_mid}"
+        })
+        if len(results) >= 5:
+            break
+
+    print(f"[HuggingFace] 抓取完成，产出 {len(results)} 个合格新词")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 数据源 4: GitHub breakout 仓库 (GitHub Search API)
+# ---------------------------------------------------------------------------
+def fetch_github_breakout():
+    """抓取 GitHub 新建仓库 breakout 信号：创建不足 14 天、日均涨星 200+ 或总星 400+。
+    仓库名本身即产品/技术新词（如 docling、browser-use），用简介做上下文。
+    未认证限流 10 req/min，本轮只打 1 次请求。
+    """
+    results = []
+    print("[GitHub] 开始抓取 breakout 仓库...")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+    cutoff_str = cutoff.strftime('%Y-%m-%d')
+    url = 'https://api.github.com/search/repositories'
+    params = {
+        'q': f'created:>{cutoff_str} stars:>100',
+        'sort': 'stars',
+        'order': 'desc',
+        'per_page': 30,
+    }
+    headers = {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'trend-watch/1.0',
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=20)
+        r.raise_for_status()
+        items = r.json().get('items', [])
+    except Exception as e:
+        print(f"[GitHub] 搜索 API 失败: {e}")
+        return results
+
+    print(f"[GitHub] 搜索返回 {len(items)} 个候选仓库")
+    now = datetime.now(timezone.utc)
+
+    for repo in items:
+        try:
+            created = datetime.fromisoformat(repo['created_at'].replace('Z', '+00:00'))
+        except Exception:
+            continue
+        age_days = max((now - created).total_seconds() / 86400.0, 0.5)
+        if age_days > 14:
+            continue
+        stars = repo.get('stargazers_count', 0) or 0
+        stars_per_day = stars / age_days
+
+        # breakout 判定：日均 200+ 星，或总星 400+（单日爆发型）
+        if not (stars_per_day >= 200 or stars >= 400):
+            continue
+
+        raw_name = repo.get('name', '')
+        # 仓库名清洗：分隔符转空格，保留原名做 note
+        term = re.sub(r'[-_]+', ' ', raw_name).strip()
+        description = (repo.get('description') or '').strip()
+        context = f"{description} stars:{stars}"
+
+        valid, reason = check_candidate(term, context)
+        if not valid:
+            print(f"[GitHub] 过滤掉{reason}: {term}")
+            continue
+
+        intent = classify_intent(term, context)
+        commercial_score = score_commercial(term, context, intent=intent)
+        event_type = classify_event_type(term, context)
+        results.append({
+            "term": term,
+            "source": "github_breakout",
+            "heat": round(stars_per_day),
+            "intent": intent,
+            "commercial_score": commercial_score,
+            "event_type": event_type,
+            "note": f"GitHub breakout：{repo.get('full_name','')} 建仓{age_days:.0f}天获{stars}星（日均{stars_per_day:.0f}）"
+        })
+        if len(results) >= 5:
+            break
+
+    print(f"[GitHub] 抓取完成，产出 {len(results)} 个合格新词")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 数据源 5: X (Twitter) 信号源
 # ---------------------------------------------------------------------------
 def fetch_x_trends():
-    """X 趋势数据源：无公开免费 API，标记为 TODO 跳过"""
-    # TODO: X (Twitter) 没有公开免费 API，按要求跳过，避免硬爬引起不稳定
+    """抓取 X (Twitter) 趋势或高互动推文。
+    X 无公开免费 API：
+    1. 优先尝试 Nitter 公开实例 RSS；
+    2. 若不稳定，降级为尝试社交搜索抓取过去 8 小时 AI/科技圈高互动推文；
+    3. 提取产品名、技术名词等 2-4 词关键词短语；
+    4. 失败时静默跳过，不阻塞主流程。
+    """
+    results = []
+    print("[X (Twitter)] 开始尝试获取 X 趋势信号...")
+
+    tweets = []
+
+    # 1. 尝试 Nitter 公开实例 RSS 检索
+    nitter_instances = [
+        "https://nitter.net",
+        "https://nitter.poast.org",
+        "https://nitter.privacydev.net",
+        "https://xcancel.com"
+    ]
+    query = "AI OR LLM OR Tech"
+
+    for instance in nitter_instances:
+        try:
+            url = f"{instance}/search/rss?f=tweets&q={requests.utils.quote(query)}"
+            resp = requests.get(url, timeout=3, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            if resp.status_code == 200 and b'<rss' in resp.content:
+                root = ET.fromstring(resp.content)
+                for item in root.findall('.//item'):
+                    title = item.find('title').text if item.find('title') is not None else ''
+                    desc = item.find('description').text if item.find('description') is not None else ''
+                    content = f"{title} {desc}".strip()
+                    if content:
+                        tweets.append((content, 10))
+                if tweets:
+                    print(f"[X (Twitter)] 通过 Nitter 实例 ({instance}) 成功获取 {len(tweets)} 条推文")
+                    break
+        except Exception:
+            continue
+
+    # 2. 若 Nitter 失败，尝试通过社交搜索接口降级抓取过去 8 小时 AI/科技圈推文
+    if not tweets:
+        try:
+            social_search_fn = None
+            try:
+                import social  # type: ignore
+                if hasattr(social, 'search'):
+                    social_search_fn = social.search
+            except ImportError:
+                pass
+
+            if social_search_fn:
+                social_results = social_search_fn(query="AI tech", time_range="8h")
+                for item in social_results:
+                    text = item.get('text') or item.get('content') or ''
+                    score = item.get('interaction') or item.get('likes') or 1
+                    if text:
+                        tweets.append((text, score))
+        except Exception:
+            # 降级调用失败静默忽略
+            pass
+
+    # 3. 失败时静默跳过，不阻塞主流程
+    if not tweets:
+        print("[X (Twitter)] 公开实例与社交搜索接口不可用，已静默跳过（不阻塞主流程）")
+        return results
+
+    # 4. 从推文中提取产品名、技术名词（2-4 词关键词短语）
+    phrase_scores, phrase_sample = extract_reddit_phrases(tweets)
+
+    for phrase, score in phrase_scores.most_common(20):
+        sample = phrase_sample.get(phrase, '')
+        valid, reason = check_candidate(phrase, sample)
+        if not valid:
+            continue
+
+        intent = classify_intent(phrase, sample)
+        if intent == 'other' and len(phrase.split()) < 2:
+            continue
+
+        c_score = score_commercial(phrase, sample, intent=intent)
+        ev_type = classify_event_type(phrase, sample)
+
+        results.append({
+            "term": phrase,
+            "source": "x",
+            "heat": score,
+            "intent": intent,
+            "commercial_score": c_score,
+            "event_type": ev_type,
+            "note": f"X平台AI/科技高互动推文提取: \"{sample[:60]}...\""
+        })
+        if len(results) >= 5:
+            break
+
+    print(f"[X (Twitter)] 提取完成，产出 {len(results)} 个合格新词")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 命中率追踪机制 (Hit Rate Tracking)
+# ---------------------------------------------------------------------------
+def load_tracking_data(path: str) -> list:
+    """加载候选词命中率追踪文件 hidden_files/word_tracking.json"""
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"[命中率追踪] 读取 {path} 失败: {e}，将初始化为空列表")
     return []
+
+
+def save_tracking_data(path: str, data: list):
+    """保存候选词追踪记录到 hidden_files/word_tracking.json"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso: str):
+    """将新发现的候选词追加写入 hidden_files/word_tracking.json"""
+    tracking_data = load_tracking_data(tracking_path)
+    existing_keys = {
+        (item.get('term', '').strip().lower(), item.get('source', ''))
+        for item in tracking_data
+    }
+
+    new_count = 0
+    for c in candidates:
+        term = c.get('term', '').strip()
+        source = c.get('source', '')
+        key = (term.lower(), source)
+        if key not in existing_keys:
+            existing_keys.add(key)
+            tracking_data.append({
+                "term": term,
+                "discovered_at": timestamp_iso,
+                "source": source,
+                "initial_heat": parse_heat(c.get('heat', 0)),
+                "checked": False,
+                "hit": None
+            })
+            new_count += 1
+
+    if new_count > 0:
+        save_tracking_data(tracking_path, tracking_data)
+        print(f"[命中率追踪] 已记录 {new_count} 个新候选词至 {tracking_path}")
+    else:
+        print(f"[命中率追踪] 本批次候选词均已在追踪列表中，无需重复记录")
+
+
+def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
+    """对 14 天前记录的候选词用 Google Trends 查询过去 14 天热度，
+    计算每个信号源的命中率（14 天后热度 > 发现时 × 2 算命中），
+    并输出 hit-rate 报告到 outputs/ 目录下。
+    """
+    print("\n=== 开始执行候选词命中率核验 (check_hit_rate) ===")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if tracking_path is None:
+        tracking_path = os.path.join(base_dir, "hidden_files", "word_tracking.json")
+    if output_dir is None:
+        output_dir = os.path.join(base_dir, "outputs")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    tracking_data = load_tracking_data(tracking_path)
+    beijing_tz = timezone(timedelta(hours=8))
+    now = datetime.now(timezone.utc).astimezone(beijing_tz)
+
+    if not tracking_data:
+        print(f"[命中率核验] 追踪库 {tracking_path} 为空，输出初始报告")
+        report = {
+            "generated_at": now.isoformat(),
+            "summary": "追踪词库为空，暂无数据",
+            "overall": {
+                "total_tracked": 0,
+                "total_evaluated": 0,
+                "total_hits": 0,
+                "hit_rate": "0.0%"
+            },
+            "sources": {},
+            "evaluated_details": []
+        }
+        _write_hit_rate_report(output_dir, report)
+        return report
+
+    # 筛选出达到 14 天周期的待核验词
+    eval_candidates = []
+    for item in tracking_data:
+        disc_str = item.get('discovered_at', '')
+        try:
+            disc_dt = datetime.fromisoformat(disc_str)
+            delta_days = (now - disc_dt).total_seconds() / 86400.0
+            if delta_days >= 14:
+                eval_candidates.append(item)
+        except Exception:
+            continue
+
+    print(f"[命中率核验] 当前总追踪词数: {len(tracking_data)}，达到 14 天周期的词数: {len(eval_candidates)}")
+
+    pt = TrendReq(hl='en-US', tz=360)
+
+    # 对达到 14 天且尚未核验的词通过 Google Trends 验证热度趋势
+    updated = False
+    for item in eval_candidates:
+        if item.get('checked'):
+            continue
+
+        term = item.get('term', '')
+        try:
+            time.sleep(1.2)  # 节流避免 Google 429 限流
+            pt.build_payload([term], timeframe='today 1-m', geo='US')
+            df = pt.interest_over_time()
+
+            if not df.empty and term in df.columns:
+                series = df[term].tolist()
+                # 丢弃最近 2 天未结算数据：Trends 数据有延迟，直接用会导致 0→100 假峰值误判
+                if len(series) > 2:
+                    series = series[:-2]
+                # 过去 14 天数据点窗口
+                series_14d = series[-14:] if len(series) >= 14 else series
+                heat_discovery = series_14d[0]
+                heat_14d = series_14d[-1]
+
+                # 命中判定规则：14 天后热度 > 发现时 × 2
+                if heat_discovery > 0:
+                    is_hit = bool(heat_14d > heat_discovery * 2)
+                else:
+                    # 若发现时热度为 0，只要 14 天后有明显热度（>0）即算爆发命中
+                    is_hit = bool(heat_14d > 0)
+
+                item['checked'] = True
+                item['hit'] = is_hit
+                item['heat_at_discovery'] = heat_discovery
+                item['heat_after_14d'] = heat_14d
+                item['check_time'] = now.isoformat()
+                updated = True
+                print(f"[命中率核验] 词 '{term}' 发现时热度: {heat_discovery}, 14天后热度: {heat_14d} -> {'命中' if is_hit else '未命中'}")
+            else:
+                item['checked'] = True
+                item['hit'] = False
+                item['heat_at_discovery'] = 0
+                item['heat_after_14d'] = 0
+                item['check_time'] = now.isoformat()
+                updated = True
+                print(f"[命中率核验] 词 '{term}' 无 Trends 数据，计为未命中")
+        except Exception as e:
+            print(f"[命中率核验] 查询 Google Trends 异常 ({term}): {e}，本次暂不标记")
+
+    if updated:
+        save_tracking_data(tracking_path, tracking_data)
+
+    # 统计各信号源命中率
+    source_stats = {}
+    total_evaluated = 0
+    total_hits = 0
+
+    for item in tracking_data:
+        if not item.get('checked'):
+            continue
+        src = item.get('source', 'unknown')
+        if src not in source_stats:
+            source_stats[src] = {'total': 0, 'hits': 0}
+        source_stats[src]['total'] += 1
+        total_evaluated += 1
+        if item.get('hit'):
+            source_stats[src]['hits'] += 1
+            total_hits += 1
+
+    for src, st in source_stats.items():
+        st['hit_rate'] = f"{(st['hits'] / st['total'] * 100):.1f}%" if st['total'] > 0 else "0.0%"
+
+    overall_rate = f"{(total_hits / total_evaluated * 100):.1f}%" if total_evaluated > 0 else "0.0%"
+
+    report = {
+        "generated_at": now.isoformat(),
+        "overall": {
+            "total_tracked": len(tracking_data),
+            "total_evaluated": total_evaluated,
+            "total_hits": total_hits,
+            "hit_rate": overall_rate
+        },
+        "sources": source_stats,
+        "evaluated_details": [
+            {
+                "term": it.get('term'),
+                "source": it.get('source'),
+                "discovered_at": it.get('discovered_at'),
+                "heat_at_discovery": it.get('heat_at_discovery'),
+                "heat_after_14d": it.get('heat_after_14d'),
+                "hit": it.get('hit'),
+                "check_time": it.get('check_time')
+            }
+            for it in tracking_data if it.get('checked')
+        ]
+    }
+
+    _write_hit_rate_report(output_dir, report)
+    print(f"[命中率核验] 核验完成：总评估 {total_evaluated} 词，命中 {total_hits} 词，总体命中率 {overall_rate}")
+    return report
+
+
+def _write_hit_rate_report(output_dir: str, report: dict):
+    """输出命中率报告至 outputs/hit_rate_report.json 与 outputs/hit_rate_report.md"""
+    json_path = os.path.join(output_dir, "hit_rate_report.json")
+    md_path = os.path.join(output_dir, "hit_rate_report.md")
+
+    # 1. 写入 JSON
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # 2. 写入 Markdown
+    md_lines = [
+        "# 候选词 14 天命中率追踪报告 (Hit Rate Report)",
+        f"- **生成时间**: {report.get('generated_at')}",
+        f"- **总追踪候选词数**: {report['overall']['total_tracked']}",
+        f"- **已完成 14 天核验词数**: {report['overall']['total_evaluated']}",
+        f"- **总体命中率**: {report['overall']['hit_rate']} ({report['overall']['total_hits']} / {report['overall']['total_evaluated']})",
+        "",
+        "## 各信号源命中率统计",
+        "| 信号源 (Source) | 评估总数 (Total) | 命中数 (Hits) | 命中率 (Hit Rate) |",
+        "| :--- | :--- | :--- | :--- |"
+    ]
+
+    sources = report.get('sources', {})
+    if sources:
+        for src, st in sources.items():
+            md_lines.append(f"| `{src}` | {st['total']} | {st['hits']} | **{st['hit_rate']}** |")
+    else:
+        md_lines.append("| 暂无数据 | 0 | 0 | 0.0% |")
+
+    md_lines.append("")
+    md_lines.append("## 已核验词详情")
+    details = report.get('evaluated_details', [])
+    if details:
+        md_lines.append("| 关键词 (Term) | 信号源 | 发现时间 | 发现时热度 | 14天后热度 | 命中状态 |")
+        md_lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+        for d in details:
+            status_str = "✅ 命中" if d.get('hit') else "❌ 未命中"
+            md_lines.append(
+                f"| `{d.get('term')}` | `{d.get('source')}` | {d.get('discovered_at', '')[:10]} | "
+                f"{d.get('heat_at_discovery')} | {d.get('heat_after_14d')} | {status_str} |"
+            )
+    else:
+        md_lines.append("暂无已完成 14 天周期的关键词详情。")
+
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write("\n".join(md_lines) + "\n")
+
+    print(f"[命中率报告] 已生成 JSON 报告: {json_path}")
+    print(f"[命中率报告] 已生成 Markdown 报告: {md_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -800,21 +1347,31 @@ def main():
     print("=== 开始运行搜索新词监控 (trend_watch.py) ===")
     all_candidates = []
 
-    # 1. Google Trends (主数据源)
-    try:
-        gt_results = fetch_google_trends()
-        all_candidates.extend(gt_results)
-    except Exception as e:
-        print(f"[Google Trends] 处理发生未知异常: {e}")
+    # 发现源优先级：GitHub breakout > HuggingFace > Reddit 技术区 > X（失败静默跳过）
+    # Google Trends 已降为纯验证源（14 天命中率核验），不再参与发现
 
-    # 2. Reddit rising (辅助)
+    # 1. GitHub breakout 仓库 (新增信号源)
+    try:
+        gh_results = fetch_github_breakout()
+        all_candidates.extend(gh_results)
+    except Exception as e:
+        print(f"[GitHub] 处理发生未知异常: {e}")
+
+    # 2. HuggingFace 趋势模型
+    try:
+        hf_results = fetch_huggingface_trending()
+        all_candidates.extend(hf_results)
+    except Exception as e:
+        print(f"[HuggingFace] 处理发生未知异常: {e}")
+
+    # 3. Reddit rising
     try:
         reddit_results = fetch_reddit_rising()
         all_candidates.extend(reddit_results)
     except Exception as e:
         print(f"[Reddit] 处理发生未知异常: {e}")
 
-    # 3. X 趋势 (TODO)
+    # 4. X 趋势 (失败静默跳过)
     try:
         x_results = fetch_x_trends()
         all_candidates.extend(x_results)
@@ -827,12 +1384,14 @@ def main():
     now_bj_iso = now_bj.isoformat()
     file_name = now_bj.strftime("%Y-%m-%d-%H.json")
 
-    output_dir = os.path.expanduser("~/workspace/trend-monitor/outputs")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(base_dir, "outputs")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, file_name)
     seen_path = os.path.join(output_dir, "seen_terms.json")
+    tracking_path = os.path.join(base_dir, "hidden_files", "word_tracking.json")
 
-    # 改动4: 已处理词去重
+    # 已处理词去重
     seen = load_seen_terms(seen_path)
     output_candidates = []
 
@@ -850,7 +1409,26 @@ def main():
             'count': prev_count + 1
         }
 
-    # 改动3: 按 (event_type 优先级, commercial_score, heat) 综合排序
+    # Jev 打分层: 给 top 候选词加结构化评分(失败不阻塞)
+    try:
+        enrich_with_jev(output_candidates)
+    except Exception as e:
+        print(f"[Jev] 批量打分发生未知异常: {e}")
+
+    # Jev 产品技术度过滤: 有有效评分且 is_product_tech < 0.6 的直接丢弃
+    # (yuliuswiki 只做产品技术类词；无评分的不拦截，避免 Jev 失败时误杀)
+    kept = []
+    for c in output_candidates:
+        j = c.get('jev') or {}
+        pt = j.get('is_product_tech')
+        if isinstance(pt, (int, float)) and pt < 0.6:
+            print(f"[Jev过滤] 丢弃: {c.get('term')} (is_product_tech={pt:.2f})")
+            continue
+        kept.append(c)
+    print(f"[Jev过滤] {len(output_candidates)} -> {len(kept)}")
+    output_candidates = kept
+
+    # 按 (event_type 优先级, commercial_score, heat) 综合排序
     output_candidates.sort(key=get_sort_key)
 
     # 写入 JSON 文件
@@ -860,10 +1438,20 @@ def main():
     # 保存 seen_terms.json
     save_seen_terms(seen_path, seen)
 
+    # 命中率追踪：记录新发现候选词至 hidden_files/word_tracking.json
+    record_discovered_terms(output_candidates, tracking_path, now_bj_iso)
+
+    # 命中率核验：核验 14 天前的候选词并生成报告至 outputs/
+    try:
+        check_hit_rate(tracking_path=tracking_path, output_dir=output_dir)
+    except Exception as e:
+        print(f"[命中率核验] 执行发生未知异常: {e}")
+
     print(f"\n=== 监控完成 ===")
     print(f"有效候选新词总数: {len(output_candidates)}")
     print(f"输出文件路径: {output_path}")
     print(f"去重库路径: {seen_path}")
+    print(f"追踪库路径: {tracking_path}")
     print("\n--- 结果预览 ---")
     print(json.dumps(output_candidates, ensure_ascii=False, indent=2))
 
