@@ -23,6 +23,7 @@ import sys
 import re
 import time
 import json
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -765,7 +766,8 @@ def fetch_reddit_rising():
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"Reddit社区上升热帖高频词，原帖: \"{sample_title[:60]}...\""
+            "note": f"Reddit社区上升热帖高频词，原帖: \"{sample_title[:60]}...\"",
+            "source_url": f"https://www.reddit.com/search/?q={urllib.parse.quote(phrase)}",
         })
         if len(results) >= 5:
             break
@@ -889,7 +891,8 @@ def fetch_huggingface_trending():
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"HuggingFace近7天高热模型关联词，来自模型 {sample_mid}"
+            "note": f"HuggingFace近7天高热模型关联词，来自模型 {sample_mid}",
+            "source_url": f"https://huggingface.co/{sample_mid}" if sample_mid else "",
         })
         if len(results) >= 5:
             break
@@ -978,6 +981,7 @@ def fetch_github_breakout():
         intent = classify_intent(q['term'], q['context'])
         commercial_score = score_commercial(q['term'], q['context'], intent=intent)
         event_type = classify_event_type(q['term'], q['context'])
+        full_name = q['repo'].get('full_name', '')
         results.append({
             "term": q['term'],
             "source": "github_breakout",
@@ -985,7 +989,8 @@ def fetch_github_breakout():
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"GitHub breakout：{q['repo'].get('full_name','')} 建仓{q['age_days']:.0f}天获{q['stars']}星（日均{q['stars_per_day']:.0f}）"
+            "note": f"GitHub breakout：{full_name} 建仓{q['age_days']:.0f}天获{q['stars']}星（日均{q['stars_per_day']:.0f}）",
+            "source_url": f"https://github.com/{full_name}" if full_name else "",
         })
 
     def emit_suite(org, members):
@@ -1012,7 +1017,8 @@ def fetch_github_breakout():
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}"
+            "note": f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}",
+            "source_url": f"https://github.com/{org}",
         })
         print(f"[GitHub] {org} 套件去重：{len(members_sorted)}个仓库合并为1个套件候选")
 
@@ -1131,6 +1137,7 @@ def fetch_gsc_new_queries():
             "commercial_score": commercial_score,
             "event_type": event_type,
             "note": context,
+            "source_url": f"https://www.google.com/search?q={urllib.parse.quote(term)}",
         })
 
     print(f"[GSC] 抓取完成，产出 {len(results)} 个合格新词")
@@ -1265,32 +1272,57 @@ def save_tracking_data(path: str, data: list):
 
 
 def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso: str):
-    """将新发现的候选词追加写入 hidden_files/word_tracking.json"""
+    """将新发现的候选词追加写入 hidden_files/word_tracking.json；
+    已在追踪中的词追加本轮热度到 heat_history（按天去重），并补 source_url。"""
     tracking_data = load_tracking_data(tracking_path)
-    existing_keys = {
-        (item.get('term', '').strip().lower(), item.get('source', ''))
-        for item in tracking_data
-    }
+    existing = {}
+    for item in tracking_data:
+        key = (item.get('term', '').strip().lower(), item.get('source', ''))
+        existing[key] = item
 
+    day = timestamp_iso[:10]
+    changed = False
     new_count = 0
     for c in candidates:
         term = c.get('term', '').strip()
         source = c.get('source', '')
         key = (term.lower(), source)
-        if key not in existing_keys:
-            existing_keys.add(key)
-            tracking_data.append({
+        heat = parse_heat(c.get('heat', 0))
+        url = c.get('source_url', '')
+        if key not in existing:
+            item = {
                 "term": term,
                 "discovered_at": timestamp_iso,
                 "source": source,
-                "initial_heat": parse_heat(c.get('heat', 0)),
+                "initial_heat": heat,
+                "heat_history": [{"date": day, "heat": heat}],
+                "source_url": url,
                 "checked": False,
-                "hit": None
-            })
+                "hit": None,
+            }
+            tracking_data.append(item)
+            existing[key] = item
             new_count += 1
+            changed = True
+        else:
+            item = existing[key]
+            # 老词补字段（历史数据无这些键）
+            if not item.get("heat_history"):
+                item["heat_history"] = [{
+                    "date": (item.get("discovered_at") or timestamp_iso)[:10],
+                    "heat": item.get("initial_heat", 0),
+                }]
+            hist = item["heat_history"]
+            if not hist or hist[-1].get("date") != day:
+                hist.append({"date": day, "heat": heat})
+                changed = True
+            if url and not item.get("source_url"):
+                item["source_url"] = url
+                changed = True
 
-    if new_count > 0:
+    if changed:
         save_tracking_data(tracking_path, tracking_data)
+    if new_count > 0:
         print(f"[命中率追踪] 已记录 {new_count} 个新候选词至 {tracking_path}")
     else:
         print(f"[命中率追踪] 本批次候选词均已在追踪列表中，无需重复记录")

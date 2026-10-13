@@ -1,0 +1,47 @@
+[
+  {
+    "term": "pdfcraft",
+    "source": "github_breakout",
+    "heat": 910,
+    "intent": "tool",
+    "commercial_score": 3,
+    "event_type": null,
+    "note": "GitHub breakout：storytold/pdfcraft 建仓12天获11346星（日均910）",
+    "jev": {
+      "is_product_tech": 0.6,
+      "intent": "paid_tool",
+      "intent_confidence": 0.37,
+      "newsworthiness": 0.37
+    }
+  },
+  {
+    "term": "lightcraft",
+    "source": "github_breakout",
+    "heat": 902,
+    "intent": "tool",
+    "commercial_score": 3,
+    "event_type": null,
+    "note": "GitHub breakout：storytold/lightcraft 建仓12天获11219星（日均902）",
+    "jev": {
+      "is_product_tech": 0.64,
+      "intent": "tech_term",
+      "intent_confidence": 0.39,
+      "newsworthiness": 0.69
+    }
+  },
+  {
+    "term": "game war.io",
+    "source": "reddit",
+    "heat": 1,
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "Reddit社区上升热帖高频词，原帖: \"Game:War.io on mobile...\"",
+    "jev": {
+      "is_product_tech": 0.9,
+      "intent": "paid_tool",
+      "intent_confidence": 0.61,
+      "newsworthiness": 0.34
+    }
+  }
+]

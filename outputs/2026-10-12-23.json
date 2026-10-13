@@ -1,0 +1,32 @@
+[
+  {
+    "term": "oracle stock",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 39.0, 24h峰值: 85 (确认突然冒头)；相关事件: Oracle (ORCL) Has $664B Lined Up. The Market Wants Cash First",
+    "jev": {
+      "is_product_tech": 0.9,
+      "intent": "company",
+      "intent_confidence": 0.99,
+      "newsworthiness": 0.05
+    }
+  },
+  {
+    "term": "vz stock",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 19.5, 24h峰值: 62 (确认突然冒头)；相关事件: Verizon (VZ) Stock Could Be Undervalued On Satellite Competition News",
+    "jev": {
+      "is_product_tech": 0.75,
+      "intent": "company",
+      "intent_confidence": 0.97,
+      "newsworthiness": 0.12
+    }
+  }
+]

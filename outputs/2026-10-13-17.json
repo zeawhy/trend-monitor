@@ -1,0 +1,17 @@
+[
+  {
+    "term": "ARTEX",
+    "source": "github_breakout",
+    "heat": 730,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "GitHub breakout：mhtsec/ARTEX 建仓5天获3757星（日均730）",
+    "jev": {
+      "is_product_tech": 0.79,
+      "intent": "company",
+      "intent_confidence": 0.67,
+      "newsworthiness": 0.16
+    }
+  }
+]

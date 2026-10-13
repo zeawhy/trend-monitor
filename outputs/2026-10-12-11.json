@@ -1,0 +1,77 @@
+[
+  {
+    "term": "abner uribe",
+    "source": "google_trends",
+    "heat": "5000+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 0.5, 24h峰值: 100 (确认突然冒头)；相关事件: Examining the Brewers' trio of dominant relievers",
+    "jev": {
+      "is_product_tech": 0.25,
+      "intent": "generic",
+      "intent_confidence": 0.99,
+      "newsworthiness": 0.14
+    }
+  },
+  {
+    "term": "carrie book",
+    "source": "google_trends",
+    "heat": "2000+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 25.3, 24h峰值: 90 (确认突然冒头)；相关事件: Stephen King and Mike Flanagan on the Resurrected ‘Carrie’",
+    "jev": {
+      "is_product_tech": 0.61,
+      "intent": "generic",
+      "intent_confidence": 0.89,
+      "newsworthiness": 0.07
+    }
+  },
+  {
+    "term": "tornadoes north carolina",
+    "source": "google_trends",
+    "heat": "1000+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 0.0, 24h峰值: 100 (确认突然冒头)；相关事件: Isaias moves north as Rachel batters Southern California",
+    "jev": {
+      "is_product_tech": 0.04,
+      "intent": "generic",
+      "intent_confidence": 1,
+      "newsworthiness": 0.27
+    }
+  },
+  {
+    "term": "ashby brewers",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 1.1, 24h峰值: 86 (确认突然冒头)；相关事件: The Brewers needed Aaron Ashby. And Aaron Ashby needed that outing",
+    "jev": {
+      "is_product_tech": 0.87,
+      "intent": "company",
+      "intent_confidence": 1,
+      "newsworthiness": 0.19
+    }
+  },
+  {
+    "term": "posiciones de cusco fc contra alianza lima",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 0.3, 24h峰值: 100 (确认突然冒头)；相关事件: Tabla de posiciones de la Liga 1: acumulado y resultados de la fecha 11 del Torneo Clausura",
+    "jev": {
+      "is_product_tech": 0.19,
+      "intent": "generic",
+      "intent_confidence": 0.95,
+      "newsworthiness": 0.39
+    }
+  }
+]

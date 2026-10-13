@@ -1,0 +1,480 @@
+[
+  {
+    "term": "nfl plus",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "google_trends",
+    "initial_heat": 500,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 500
+      }
+    ]
+  },
+  {
+    "term": "ind vs wi t20",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "parker washington",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "google_trends",
+    "initial_heat": 2000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 2000
+      }
+    ]
+  },
+  {
+    "term": "qwen image",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "huggingface",
+    "initial_heat": 133532,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 133532
+      }
+    ]
+  },
+  {
+    "term": "image 2.1",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "huggingface",
+    "initial_heat": 110137,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 110137
+      }
+    ]
+  },
+  {
+    "term": "qwen image 2.1",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "huggingface",
+    "initial_heat": 110137,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 110137
+      }
+    ]
+  },
+  {
+    "term": "2.1 comfyui",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "huggingface",
+    "initial_heat": 86742,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 86742
+      }
+    ]
+  },
+  {
+    "term": "comfyui diffusion",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "huggingface",
+    "initial_heat": 86742,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 86742
+      }
+    ]
+  },
+  {
+    "term": "real sociedad - deportivo",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "google_trends",
+    "initial_heat": 2000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 2000
+      }
+    ]
+  },
+  {
+    "term": "cbs sunday morning",
+    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+    "source": "google_trends",
+    "initial_heat": 500,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 500
+      }
+    ]
+  },
+  {
+    "term": "liverpool - manchester city",
+    "discovered_at": "2026-10-11T23:08:23.150351+08:00",
+    "source": "google_trends",
+    "initial_heat": 20000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 20000
+      }
+    ]
+  },
+  {
+    "term": "tarleton state football",
+    "discovered_at": "2026-10-11T23:08:23.150351+08:00",
+    "source": "google_trends",
+    "initial_heat": 2000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 2000
+      }
+    ]
+  },
+  {
+    "term": "carnell tate",
+    "discovered_at": "2026-10-11T23:08:23.150351+08:00",
+    "source": "google_trends",
+    "initial_heat": 500,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 500
+      }
+    ]
+  },
+  {
+    "term": "godzilla minus zero king ghidorah trailer",
+    "discovered_at": "2026-10-11T23:08:23.150351+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "chicago marathon winner",
+    "discovered_at": "2026-10-11T23:08:23.150351+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-11",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "giants record",
+    "discovered_at": "2026-10-12T05:08:27.758574+08:00",
+    "source": "google_trends",
+    "initial_heat": 2000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 2000
+      }
+    ]
+  },
+  {
+    "term": "ny giants standings",
+    "discovered_at": "2026-10-12T05:08:27.758574+08:00",
+    "source": "google_trends",
+    "initial_heat": 500,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 500
+      }
+    ]
+  },
+  {
+    "term": "giants score today",
+    "discovered_at": "2026-10-12T05:08:27.758574+08:00",
+    "source": "google_trends",
+    "initial_heat": 500,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 500
+      }
+    ]
+  },
+  {
+    "term": "super bowl 2026",
+    "discovered_at": "2026-10-12T05:08:27.758574+08:00",
+    "source": "google_trends",
+    "initial_heat": 1000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 1000
+      }
+    ]
+  },
+  {
+    "term": "keke palmer",
+    "discovered_at": "2026-10-12T05:08:27.758574+08:00",
+    "source": "google_trends",
+    "initial_heat": 1000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 1000
+      }
+    ]
+  },
+  {
+    "term": "abner uribe",
+    "discovered_at": "2026-10-12T11:08:32.979258+08:00",
+    "source": "google_trends",
+    "initial_heat": 5000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 5000
+      }
+    ]
+  },
+  {
+    "term": "carrie book",
+    "discovered_at": "2026-10-12T11:08:32.979258+08:00",
+    "source": "google_trends",
+    "initial_heat": 2000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 2000
+      }
+    ]
+  },
+  {
+    "term": "tornadoes north carolina",
+    "discovered_at": "2026-10-12T11:08:32.979258+08:00",
+    "source": "google_trends",
+    "initial_heat": 1000,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 1000
+      }
+    ]
+  },
+  {
+    "term": "ashby brewers",
+    "discovered_at": "2026-10-12T11:08:32.979258+08:00",
+    "source": "google_trends",
+    "initial_heat": 500,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 500
+      }
+    ]
+  },
+  {
+    "term": "posiciones de cusco fc contra alianza lima",
+    "discovered_at": "2026-10-12T11:08:32.979258+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "rockstar games",
+    "discovered_at": "2026-10-12T17:08:19.496843+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "openai",
+    "discovered_at": "2026-10-12T17:08:19.496843+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "kospi",
+    "discovered_at": "2026-10-12T17:08:19.496843+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "oracle stock",
+    "discovered_at": "2026-10-12T23:08:44.535230+08:00",
+    "source": "google_trends",
+    "initial_heat": 500,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 500
+      }
+    ]
+  },
+  {
+    "term": "vz stock",
+    "discovered_at": "2026-10-12T23:08:44.535230+08:00",
+    "source": "google_trends",
+    "initial_heat": 200,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-12",
+        "heat": 200
+      }
+    ]
+  },
+  {
+    "term": "pdfcraft",
+    "discovered_at": "2026-10-13T08:44:54.935813+08:00",
+    "source": "github_breakout",
+    "initial_heat": 910,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-13",
+        "heat": 910
+      }
+    ],
+    "source_url": "https://github.com/storytold/pdfcraft"
+  },
+  {
+    "term": "lightcraft",
+    "discovered_at": "2026-10-13T08:44:54.935813+08:00",
+    "source": "github_breakout",
+    "initial_heat": 902,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-13",
+        "heat": 902
+      }
+    ]
+  },
+  {
+    "term": "game war.io",
+    "discovered_at": "2026-10-13T08:44:54.935813+08:00",
+    "source": "reddit",
+    "initial_heat": 1,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-13",
+        "heat": 1
+      }
+    ]
+  },
+  {
+    "term": "ARTEX",
+    "discovered_at": "2026-10-13T17:08:03.568350+08:00",
+    "source": "github_breakout",
+    "initial_heat": 730,
+    "checked": false,
+    "hit": null,
+    "heat_history": [
+      {
+        "date": "2026-10-13",
+        "heat": 730
+      }
+    ],
+    "source_url": "https://github.com/mhtsec/ARTEX"
+  }
+]

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>新词监控控制台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1420; color: #e8ecf4; padding: 16px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #8b93a7; font-size: 13px; margin-bottom: 20px; }
+  h2 { font-size: 16px; margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #232b3d; }
+  .card { background: #1a2133; border-radius: 10px; padding: 14px; margin-bottom: 12px; border: 1px solid #232b3d; }
+  .term { font-size: 17px; font-weight: 600; margin-bottom: 8px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .badge { font-size: 12px; padding: 3px 10px; border-radius: 20px; background: #2a3350; color: #aeb8d0; }
+  .badge.heat { background: #3d2b1f; color: #f0a35e; }
+  .badge.src-hf { background: #1f3d2b; color: #5ef0a3; }
+  .badge.src-trends { background: #2b2f3d; color: #9ea8c0; }
+  .badge.tool { background: #2b1f3d; color: #c45ef0; }
+  .scores { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin: 8px 0; }
+  .score { background: #141a2a; border-radius: 8px; padding: 8px; text-align: center; }
+  .score .v { font-size: 18px; font-weight: 700; }
+  .score .l { font-size: 11px; color: #8b93a7; margin-top: 2px; }
+  .note { font-size: 13px; color: #aeb8d0; line-height: 1.6; }
+  .verdict { margin-top: 8px; font-size: 13px; font-weight: 600; }
+  .verdict.go { color: #5ef0a3; }
+  .verdict.skip { color: #8b93a7; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #232b3d; }
+  th { color: #8b93a7; font-weight: 500; }
+  .stat-row { display: flex; gap: 12px; margin-bottom: 12px; }
+  .stat { flex: 1; background: #1a2133; border-radius: 10px; padding: 14px; text-align: center; border: 1px solid #232b3d; }
+  .stat .n { font-size: 24px; font-weight: 700; }
+  .stat .t { font-size: 12px; color: #8b93a7; margin-top: 4px; }
+  .loading { color: #8b93a7; text-align: center; padding: 40px; }
+  .route-wiki { color: #5ea3f0; }
+  .route-tool { color: #c45ef0; }
+  .route-drop { color: #8b93a7; }
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 28px; min-width: 60px; }
+  .sbar { width: 9px; background: #f0a35e; border-radius: 2px; min-height: 2px; }
+  .src-link { color: #5ea3f0; font-size: 12px; text-decoration: none; }
+  .src-link:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<h1>🎯 新词监控控制台</h1>
+<div class="sub" id="updated">加载中…</div>
+
+<h2>📊 命中率追踪</h2>
+<div class="stat-row" id="hitStats"><div class="loading">加载中…</div></div>
+<div class="card"><table id="hitTable"><tr><th>信号源</th><th>评估数</th><th>命中</th><th>命中率</th></tr></table></div>
+
+<h2>🆕 最新一轮候选词</h2>
+<div id="latest"><div class="loading">加载中…</div></div>
+
+<h2>⏳ 14天追踪中</h2>
+<div id="tracking"><div class="loading">加载中…</div></div>
+
+<script>
+async function load(p) { const r = await fetch('data/' + p); return r.json(); }
+function srcName(s) {
+  return { github_breakout: 'GitHub', huggingface: 'HF', reddit: 'Reddit',
+           gsc_first_impression: 'GSC', x: 'X' }[s] || s;
+}
+function srcLink(c) {
+  return c.source_url ? ` <a class="src-link" href="${c.source_url}" target="_blank" rel="noopener">源地址 ↗</a>` : '';
+}
+function spark(hist) {
+  if (!hist || !hist.length) return '<span style="color:#8b93a7">—</span>';
+  const max = Math.max(...hist.map(h => h.heat), 1);
+  const bars = hist.map(h => {
+    const pct = Math.max(6, Math.round(h.heat / max * 100));
+    return `<div class="sbar" style="height:${pct}%" title="${h.date}: 热度 ${h.heat}"></div>`;
+  }).join('');
+  return `<div class="spark">${bars}</div>`;
+}
+function trendArrow(hist) {
+  if (!hist || hist.length < 2) return '<span style="color:#8b93a7">—</span>';
+  const a = hist[0].heat, b = hist[hist.length - 1].heat;
+  if (a <= 0) return '<span style="color:#8b93a7">—</span>';
+  if (b >= a * 1.2) return '<span style="color:#5ef0a3">▲ 升温</span>';
+  if (b <= a * 0.8) return '<span style="color:#f05e5e">▼ 降温</span>';
+  return '<span style="color:#8b93a7">— 平稳</span>';
+}
+function verdict(c) {
+  const pt = c.jev ? c.jev.is_product_tech : 0;
+  const intent = c.jev ? c.jev.intent : c.intent;
+  if (pt >= 0.6) {
+    if (['paid_tool'].includes(intent) || /converter|calculator|generator|formatter|tool/i.test(c.term))
+      return { t: '→ yuliusbox 做工具', c: 'go route-tool' };
+    return { t: '→ yuliuswiki 写文章', c: 'go route-wiki' };
+  }
+  return { t: '丢弃（非技术产品词）', c: 'skip route-drop' };
+}
+(async () => {
+  try {
+    const [latest, meta, hit, tracking] = await Promise.all([
+      load('latest.json'), load('meta.json'), load('hit_rate.json'), load('tracking.json')
+    ]);
+    document.getElementById('updated').textContent =
+      '数据更新时间：' + (meta.updated_at || '未知') + '　·　每6小时自动扫描';
+    // hit rate
+    const hs = document.getElementById('hitStats');
+    hs.innerHTML =
+      `<div class="stat"><div class="n">${hit.total_tracked || 0}</div><div class="t">追踪词数</div></div>` +
+      `<div class="stat"><div class="n">${hit.verified || 0}</div><div class="t">已核验</div></div>` +
+      `<div class="stat"><div class="n">${(hit.overall_rate != null ? (hit.overall_rate*100).toFixed(1) : '0.0')}%</div><div class="t">总体命中率</div></div>`;
+    const ht = document.getElementById('hitTable');
+    (hit.by_source || []).forEach(s => {
+      ht.innerHTML += `<tr><td>${s.source}</td><td>${s.total}</td><td>${s.hits}</td><td>${(s.rate*100).toFixed(1)}%</td></tr>`;
+    });
+    // latest
+    const box = document.getElementById('latest');
+    if (!latest.length) box.innerHTML = '<div class="card"><div class="note">本轮无候选词</div></div>';
+    else box.innerHTML = latest.map(c => {
+      const v = verdict(c);
+      const j = c.jev || {};
+      return `<div class="card">
+        <div class="term">${c.term}${srcLink(c)}</div>
+        <div class="badges">
+          <span class="badge heat">🔥 ${c.heat}</span>
+          <span class="badge">${srcName(c.source)}</span>
+          <span class="badge">${j.intent || c.intent || '未知意图'}</span>
+        </div>
+        <div class="scores">
+          <div class="score"><div class="v">${(j.is_product_tech ?? 0).toFixed(2)}</div><div class="l">产品技术度</div></div>
+          <div class="score"><div class="v">${(j.newsworthiness ?? 0).toFixed(2)}</div><div class="l">新闻价值</div></div>
+          <div class="score"><div class="v">${c.commercial_score ?? '-'}</div><div class="l">商业分</div></div>
+        </div>
+        ${c.note ? `<div class="note">${c.note}</div>` : ''}
+        <div class="verdict ${v.c}">${v.t}</div>
+      </div>`;
+    }).join('');
+    // tracking
+    const tb = document.getElementById('tracking');
+    const pending = (tracking || []).filter(t => !t.checked);
+    tb.innerHTML = pending.length
+      ? `<div class="card"><table><tr><th>词</th><th>来源</th><th>首次发现</th><th>热度走势</th><th>当前热度</th><th>趋势</th></tr>` +
+        pending.map(t => {
+          const hist = t.heat_history || [];
+          const cur = hist.length ? hist[hist.length - 1].heat : (t.initial_heat || 0);
+          const srcCell = t.source_url
+            ? `<a class="src-link" href="${t.source_url}" target="_blank" rel="noopener">${srcName(t.source)} ↗</a>`
+            : srcName(t.source);
+          return `<tr><td>${t.term}</td><td>${srcCell}</td><td>${(t.discovered_at || '').slice(0, 10)}</td>` +
+            `<td>${spark(hist)}</td><td>${cur}</td><td>${trendArrow(hist)}</td></tr>`;
+        }).join('') + `</table></div>`
+      : '<div class="card"><div class="note">暂无追踪中的词</div></div>';
+  } catch (e) {
+    document.getElementById('updated').textContent = '数据加载失败：' + e.message;
+  }
+})();
+</script>
+</body>
+</html>

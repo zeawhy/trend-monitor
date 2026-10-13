@@ -1,0 +1,77 @@
+[
+  {
+    "term": "giants record",
+    "source": "google_trends",
+    "heat": "2000+",
+    "intent": "tool",
+    "commercial_score": 4,
+    "event_type": null,
+    "note": "7天基线热度: 8.1, 24h峰值: 100 (确认突然冒头)；相关事件: NFL Week 5 picks: Upset and score predictions, matchup breakdowns for every game",
+    "jev": {
+      "is_product_tech": 0.2,
+      "intent": "generic",
+      "intent_confidence": 0.65,
+      "newsworthiness": 0.16
+    }
+  },
+  {
+    "term": "ny giants standings",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 3.1, 24h峰值: 100 (确认突然冒头)；相关事件: NFL Week 5 Inactive List: Who's in, who's out for Giants at Commanders",
+    "jev": {
+      "is_product_tech": 0.26,
+      "intent": "generic",
+      "intent_confidence": 0.81,
+      "newsworthiness": 0.12
+    }
+  },
+  {
+    "term": "giants score today",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 0.6, 24h峰值: 100 (确认突然冒头)；相关事件: Giants vs. Commanders (12 Oct, 2026) Live Score",
+    "jev": {
+      "is_product_tech": 0.35,
+      "intent": "generic",
+      "intent_confidence": 0.71,
+      "newsworthiness": 0.21
+    }
+  },
+  {
+    "term": "super bowl 2026",
+    "source": "google_trends",
+    "heat": "1000+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 17.7, 24h峰值: 100 (确认突然冒头)；相关事件: Disney+ Will Stream 2027 Super Bowl",
+    "jev": {
+      "is_product_tech": 0.36,
+      "intent": "generic",
+      "intent_confidence": 0.99,
+      "newsworthiness": 0.5
+    }
+  },
+  {
+    "term": "keke palmer",
+    "source": "google_trends",
+    "heat": "1000+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 28.8, 24h峰值: 100 (确认突然冒头)；相关事件: Keke Palmer Admits She’ll ‘Be an Issue’ When Son Leo, 3, Plays Sports: ‘People Are Going to Be Like, You Can’t Do This’ (Exclusive)",
+    "jev": {
+      "is_product_tech": 0.27,
+      "intent": "generic",
+      "intent_confidence": 0.99,
+      "newsworthiness": 0.18
+    }
+  }
+]

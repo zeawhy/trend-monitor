@@ -1,0 +1,77 @@
+[
+  {
+    "term": "liverpool - manchester city",
+    "source": "google_trends",
+    "heat": "20000+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 0.1, 24h峰值: 100 (确认突然冒头)；相关事件: Liverpool v Manchester City: Premier League – live",
+    "jev": {
+      "is_product_tech": 0.18,
+      "intent": "generic",
+      "intent_confidence": 0.88,
+      "newsworthiness": 0.12
+    }
+  },
+  {
+    "term": "tarleton state football",
+    "source": "google_trends",
+    "heat": "2000+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 8.5, 24h峰值: 95 (确认突然冒头)；相关事件: Austin Peay drops heartbreaker to Tarleton State for first FCS loss of season",
+    "jev": {
+      "is_product_tech": 0.37,
+      "intent": "generic",
+      "intent_confidence": 0.68,
+      "newsworthiness": 0.29
+    }
+  },
+  {
+    "term": "carnell tate",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 13.6, 24h峰值: 100 (确认突然冒头)；相关事件: Titans' Carnell Tate: Expected to play Sunday",
+    "jev": {
+      "is_product_tech": 0.36,
+      "intent": "generic",
+      "intent_confidence": 0.91,
+      "newsworthiness": 0.13
+    }
+  },
+  {
+    "term": "godzilla minus zero king ghidorah trailer",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 0.3, 24h峰值: 100 (确认突然冒头)；相关事件: Let a New ‘Godzilla Minus Zero’ Trailer Start Your Morning",
+    "jev": {
+      "is_product_tech": 0.56,
+      "intent": "generic",
+      "intent_confidence": 0.96,
+      "newsworthiness": 0.74
+    }
+  },
+  {
+    "term": "chicago marathon winner",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 0.0, 24h峰值: 100 (确认突然冒头)；相关事件: After finishing 2nd and 3rd, Amos Kipruto finally gets his Chicago Marathon win",
+    "jev": {
+      "is_product_tech": 0.07,
+      "intent": "generic",
+      "intent_confidence": 1,
+      "newsworthiness": 0.25
+    }
+  }
+]

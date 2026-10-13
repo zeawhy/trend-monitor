@@ -1,0 +1,47 @@
+[
+  {
+    "term": "rockstar games",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "other",
+    "commercial_score": 1,
+    "event_type": "product_launch",
+    "note": "7天曲线校验跳过(TooManyRequestsError)，依赖24h榜单确认；相关事件: 'GTA 6' official merch is live, and it's already selling out: Where to buy",
+    "jev": {
+      "is_product_tech": 0.93,
+      "intent": "company",
+      "intent_confidence": 1,
+      "newsworthiness": 0.04
+    }
+  },
+  {
+    "term": "openai",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天曲线校验跳过(TooManyRequestsError)，依赖24h榜单确认；相关事件: Andrew Garfield says OpenAI film 'Artificial' turns lens on creators of 'new world'",
+    "jev": {
+      "is_product_tech": 0.96,
+      "intent": "company",
+      "intent_confidence": 1,
+      "newsworthiness": 0.05
+    }
+  },
+  {
+    "term": "kospi",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天曲线校验跳过(TooManyRequestsError)，依赖24h榜单确认；相关事件: Once-Hot AI Trade Leaves Korean Stocks Struggling for Buyers",
+    "jev": {
+      "is_product_tech": 0.72,
+      "intent": "company",
+      "intent_confidence": 0.23,
+      "newsworthiness": 0.14
+    }
+  }
+]

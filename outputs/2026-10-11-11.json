@@ -1,0 +1,47 @@
+[
+  {
+    "term": "world series 2026",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 15.1, 24h峰值: 37 (确认突然冒头)；相关事件: Latest World Series 2026 Predictions from MLB Fans, Experts amid Playoff Bracket"
+  },
+  {
+    "term": "ángel sepúlveda",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 0.0, 24h峰值: 100 (确认突然冒头)；相关事件: El Gato Ortiz desata la controversia en el Chivas vs Atlas: reclaman penal por una mano"
+  },
+  {
+    "term": "the social network",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 43.0, 24h峰值: 100 (确认突然冒头)；相关事件: ‘The Social Reckoning’ Review: Sounding the Alarm"
+  },
+  {
+    "term": "kentucky football coach",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "info",
+    "commercial_score": 1,
+    "event_type": null,
+    "note": "7天基线热度: 0.0, 24h峰值: 100 (确认突然冒头)；相关事件: LSU head coach Lane Kiffin enjoys ‘girly pop’ at hot Pilates before Kentucky game"
+  },
+  {
+    "term": "terrell owens",
+    "source": "google_trends",
+    "heat": "1000+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 4.6, 24h峰值: 100 (确认突然冒头)；相关事件: Friends of Nolan Wells sue NFL Hall of Famer Terrell Owens for defamation"
+  }
+]

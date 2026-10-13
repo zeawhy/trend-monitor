@@ -1,0 +1,92 @@
+[
+  {
+    "term": "nfl plus",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "tool",
+    "commercial_score": 4,
+    "event_type": null,
+    "note": "7天基线热度: 5.8, 24h峰值: 40 (确认突然冒头)；相关事件: Cody Brown Picks Plus Money NFL Player Props That Have Cashed in 100% of Games This Season"
+  },
+  {
+    "term": "ind vs wi t20",
+    "source": "google_trends",
+    "heat": "200+",
+    "intent": "info",
+    "commercial_score": 3,
+    "event_type": null,
+    "note": "7天基线热度: 11.2, 24h峰值: 100 (确认突然冒头)；相关事件: India and West Indies head to Indore for potential run-fest with series level"
+  },
+  {
+    "term": "parker washington",
+    "source": "google_trends",
+    "heat": "2000+",
+    "intent": "info",
+    "commercial_score": 2,
+    "event_type": null,
+    "note": "7天基线热度: 1.4, 24h峰值: 100 (确认突然冒头)；相关事件: NFL Fantasy 2026 Start 'Em, Sit 'Em: Wide receivers for Week 5"
+  },
+  {
+    "term": "qwen image",
+    "source": "huggingface",
+    "heat": 133532,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "HuggingFace近7天高热模型关联词，来自模型 Comfy-Org/Qwen-Image-2.1"
+  },
+  {
+    "term": "image 2.1",
+    "source": "huggingface",
+    "heat": 110137,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "HuggingFace近7天高热模型关联词，来自模型 Comfy-Org/Qwen-Image-2.1"
+  },
+  {
+    "term": "qwen image 2.1",
+    "source": "huggingface",
+    "heat": 110137,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "HuggingFace近7天高热模型关联词，来自模型 Comfy-Org/Qwen-Image-2.1"
+  },
+  {
+    "term": "2.1 comfyui",
+    "source": "huggingface",
+    "heat": 86742,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "HuggingFace近7天高热模型关联词，来自模型 Comfy-Org/Qwen-Image-2.1"
+  },
+  {
+    "term": "comfyui diffusion",
+    "source": "huggingface",
+    "heat": 86742,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "HuggingFace近7天高热模型关联词，来自模型 Comfy-Org/Qwen-Image-2.1"
+  },
+  {
+    "term": "real sociedad - deportivo",
+    "source": "google_trends",
+    "heat": "2000+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 0.0, 24h峰值: 100 (确认突然冒头)；相关事件: Dos caminos opuestos, tres supervivientes y un reencuentro de Primera"
+  },
+  {
+    "term": "cbs sunday morning",
+    "source": "google_trends",
+    "heat": "500+",
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "7天基线热度: 2.5, 24h峰值: 100 (确认突然冒头)；相关事件: “CBS SUNDAY MORNING” LISTINGS FOR OCTOBER 11, 2026, 9:00-10:30 AM, ET"
+  }
+]
