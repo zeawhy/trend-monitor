@@ -934,6 +934,8 @@ def fetch_github_breakout():
     print(f"[GitHub] 搜索返回 {len(items)} 个候选仓库")
     now = datetime.now(timezone.utc)
 
+    # 先收集全部 breakout 仓库，再按 org 分组做套件去重
+    qualified = []
     for repo in items:
         try:
             created = datetime.fromisoformat(repo['created_at'].replace('Z', '+00:00'))
@@ -954,24 +956,72 @@ def fetch_github_breakout():
         term = re.sub(r'[-_]+', ' ', raw_name).strip()
         description = (repo.get('description') or '').strip()
         context = f"{description} stars:{stars}"
+        org = (repo.get('full_name') or '/').split('/')[0]
 
         valid, reason = check_candidate(term, context)
         if not valid:
             print(f"[GitHub] 过滤掉{reason}: {term}")
             continue
 
-        intent = classify_intent(term, context)
-        commercial_score = score_commercial(term, context, intent=intent)
-        event_type = classify_event_type(term, context)
+        qualified.append({
+            'repo': repo, 'term': term, 'context': context, 'org': org,
+            'stars': stars, 'stars_per_day': stars_per_day, 'age_days': age_days,
+        })
+
+    # 套件去重：同一 org 在本轮出现 ≥3 个 breakout 仓库时，只发一个套件级候选，
+    # 避免逐词建出高度雷同的 doorway pages（如 storytold 一次推 10 款 *craft）
+    by_org = {}
+    for q in qualified:
+        by_org.setdefault(q['org'], []).append(q)
+
+    def emit_single(q):
+        intent = classify_intent(q['term'], q['context'])
+        commercial_score = score_commercial(q['term'], q['context'], intent=intent)
+        event_type = classify_event_type(q['term'], q['context'])
         results.append({
-            "term": term,
+            "term": q['term'],
             "source": "github_breakout",
-            "heat": round(stars_per_day),
+            "heat": round(q['stars_per_day']),
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"GitHub breakout：{repo.get('full_name','')} 建仓{age_days:.0f}天获{stars}星（日均{stars_per_day:.0f}）"
+            "note": f"GitHub breakout：{q['repo'].get('full_name','')} 建仓{q['age_days']:.0f}天获{q['stars']}星（日均{q['stars_per_day']:.0f}）"
         })
+
+    def emit_suite(org, members):
+        members_sorted = sorted(members, key=lambda m: m['stars'], reverse=True)
+        total_stars = sum(m['stars'] for m in members_sorted)
+        member_list = '、'.join(
+            f"{m['repo'].get('full_name','')}({m['stars']}星)" for m in members_sorted[:10]
+        )
+        suite_term = f"{org} suite"
+        context = f"GitHub同org套件级爆发，共{len(members_sorted)}个仓库：{member_list}"
+        valid, reason = check_candidate(suite_term, context)
+        if not valid:
+            print(f"[GitHub] 套件词过滤掉{reason}: {suite_term}，回退逐个输出")
+            for m in members_sorted:
+                emit_single(m)
+            return
+        intent = classify_intent(suite_term, context)
+        commercial_score = score_commercial(suite_term, context, intent=intent)
+        event_type = classify_event_type(suite_term, context)
+        results.append({
+            "term": suite_term,
+            "source": "github_breakout",
+            "heat": round(sum(m['stars_per_day'] for m in members_sorted)),
+            "intent": intent,
+            "commercial_score": commercial_score,
+            "event_type": event_type,
+            "note": f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}"
+        })
+        print(f"[GitHub] {org} 套件去重：{len(members_sorted)}个仓库合并为1个套件候选")
+
+    for org, members in sorted(by_org.items(), key=lambda kv: -sum(m['stars'] for m in kv[1])):
+        if len(members) >= 3:
+            emit_suite(org, members)
+        else:
+            for m in members:
+                emit_single(m)
         if len(results) >= 5:
             break
 
