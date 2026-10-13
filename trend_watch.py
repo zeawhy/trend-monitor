@@ -1030,7 +1030,115 @@ def fetch_github_breakout():
 
 
 # ---------------------------------------------------------------------------
-# 数据源 5: X (Twitter) 信号源
+# 数据源 5: GSC "第一次有展现" 新词 (Google Search Console Search Analytics)
+# ---------------------------------------------------------------------------
+def fetch_gsc_new_queries():
+    """GSC first-impression 新词发现：拉各站点近 14 天 query 数据，
+    找出基线快照里从没出现过的新 query——这是真实用户搜到我们站的词，
+    天然带搜索需求，直接做 yuliusbox 长尾页选题。
+    借鉴 new-term-radar 的 Search Console first-impression 信号。
+    """
+    results = []
+    print("[GSC] 开始抓取首次有展现的新 query...")
+
+    try:
+        import urllib.parse
+        sys.path.insert(0, os.path.expanduser("~/workspace/gsc-api"))
+        import gsc as gsc_client
+    except Exception as e:
+        print(f"[GSC] 导入 gsc 客户端失败: {e}")
+        return results
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    baseline_path = os.path.join(base_dir, "hidden_files", "gsc_seen_queries.json")
+    try:
+        with open(baseline_path, encoding="utf-8") as f:
+            baseline = json.load(f)
+    except Exception:
+        baseline = {}
+
+    sites = [
+        "https://www.yuliusbox.com/",
+        "https://www.heic2jpg-free.com/",
+        "https://yuliuswiki.com/",
+    ]
+    today = datetime.now(timezone.utc).date()
+    end = (today - timedelta(days=2)).isoformat()      # GSC 数据滞后约 2 天
+    start = (today - timedelta(days=16)).isoformat()
+
+    try:
+        token = gsc_client.get_access_token()
+    except Exception as e:
+        print(f"[GSC] 获取 access token 失败: {e}")
+        return results
+
+    new_terms = []
+    for site in sites:
+        try:
+            enc = urllib.parse.quote(site, safe="")
+            res = gsc_client.api_post(
+                f"/sites/{enc}/searchAnalytics/query", token,
+                {"startDate": start, "endDate": end,
+                 "dimensions": ["query"], "rowLimit": 1000},
+            )
+        except Exception as e:
+            print(f"[GSC] {site} 查询失败: {e}")
+            continue
+        seen = set(baseline.get(site, []))
+        current = {}
+        for row in res.get("rows", []):
+            q = (row.get("keys") or [""])[0].strip().lower()
+            if not q:
+                continue
+            current[q] = {
+                "impressions": row.get("impressions", 0),
+                "clicks": row.get("clicks", 0),
+            }
+        # 基线更新：并入本轮全部 query
+        baseline[site] = sorted(set(baseline.get(site, [])) | set(current.keys()))
+        for q, m in current.items():
+            if q not in seen and m["impressions"] >= 2:  # 过滤单次展现噪音
+                # 过滤 URL 型导航查询（如 "https://heic2jpg.com"）：无建页价值
+                if re.search(r"https?://|www\.|\.(com|net|org|io|cn)\b", q):
+                    continue
+                new_terms.append((site, q, m))
+
+    try:
+        os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
+        with open(baseline_path, "w", encoding="utf-8") as f:
+            json.dump(baseline, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[GSC] 基线写入失败: {e}")
+
+    new_terms.sort(key=lambda t: -t[2]["impressions"])
+    print(f"[GSC] 发现 {len(new_terms)} 个首次有展现的新 query")
+
+    for site, term, m in new_terms[:5]:
+        context = (f"GSC首次展现: {site} 近14天展现{m['impressions']}次"
+                   f"点击{m['clicks']}次")
+        valid, reason = check_candidate(term, context)
+        if not valid:
+            print(f"[GSC] 过滤掉{reason}: {term}")
+            continue
+        intent = classify_intent(term, context)
+        commercial_score = score_commercial(term, context, intent=intent)
+        event_type = classify_event_type(term, context)
+        results.append({
+            "term": term,
+            "source": "gsc_first_impression",
+            "heat": m["impressions"],
+            "intent": intent,
+            "commercial_score": commercial_score,
+            "event_type": event_type,
+            "note": context,
+        })
+
+    print(f"[GSC] 抓取完成，产出 {len(results)} 个合格新词")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 数据源 6: X (Twitter) 信号源
 # ---------------------------------------------------------------------------
 def fetch_x_trends():
     """抓取 X (Twitter) 趋势或高互动推文。
@@ -1397,7 +1505,7 @@ def main():
     print("=== 开始运行搜索新词监控 (trend_watch.py) ===")
     all_candidates = []
 
-    # 发现源优先级：GitHub breakout > HuggingFace > Reddit 技术区 > X（失败静默跳过）
+    # 发现源优先级：GitHub breakout > HuggingFace > Reddit 技术区 > GSC 首次展现 > X（失败静默跳过）
     # Google Trends 已降为纯验证源（14 天命中率核验），不再参与发现
 
     # 1. GitHub breakout 仓库 (新增信号源)
@@ -1427,6 +1535,13 @@ def main():
         all_candidates.extend(x_results)
     except Exception as e:
         print(f"[X] 处理发生未知异常: {e}")
+
+    # 5. GSC 首次有展现的新 query（真实用户搜索，长尾页选题）
+    try:
+        gsc_results = fetch_gsc_new_queries()
+        all_candidates.extend(gsc_results)
+    except Exception as e:
+        print(f"[GSC] 处理发生未知异常: {e}")
 
     # 确定输出文件路径（按北京时间 UTC+8 命名：YYYY-MM-DD-HH.json）
     beijing_tz = timezone(timedelta(hours=8))
