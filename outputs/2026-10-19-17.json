@@ -1,0 +1,18 @@
+[
+  {
+    "term": "comfyui diffusion single",
+    "source": "huggingface",
+    "heat": 120790,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "HuggingFace近7天高热模型关联词，来自模型 Comfy-Org/Qwen-Image-2.1",
+    "source_url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1",
+    "jev": {
+      "is_product_tech": 0.7,
+      "intent": "tech_term",
+      "intent_confidence": 0.92,
+      "newsworthiness": 0.47
+    }
+  }
+]

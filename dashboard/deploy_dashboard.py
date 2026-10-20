@@ -3,7 +3,7 @@
 import sys, os, subprocess
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, '/opt/hatch/skills/skill-creator/bin')
+sys.path.insert(0, '/opt/hatch/workflow-skills/custom-connector-setup/bin')
 from dynamic_credentials import dynamic_credential_entry
 
 r = subprocess.run([sys.executable, os.path.join(BASE, 'update_dashboard.py')],

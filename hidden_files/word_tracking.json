@@ -476,5 +476,50 @@
       }
     ],
     "source_url": "https://github.com/mhtsec/ARTEX"
+  },
+  {
+    "term": "artex framework",
+    "discovered_at": "2026-10-16T23:08:23.934014+08:00",
+    "source": "gsc_first_impression",
+    "initial_heat": 2,
+    "heat_history": [
+      {
+        "date": "2026-10-16",
+        "heat": 2
+      }
+    ],
+    "source_url": "https://www.google.com/search?q=artex%20framework",
+    "checked": false,
+    "hit": null
+  },
+  {
+    "term": "solidcraft",
+    "discovered_at": "2026-10-18T11:08:12.548504+08:00",
+    "source": "github_breakout",
+    "initial_heat": 424,
+    "heat_history": [
+      {
+        "date": "2026-10-18",
+        "heat": 424
+      }
+    ],
+    "source_url": "https://github.com/tangency-labs/solidcraft",
+    "checked": false,
+    "hit": null
+  },
+  {
+    "term": "comfyui diffusion single",
+    "discovered_at": "2026-10-19T17:08:09.523416+08:00",
+    "source": "huggingface",
+    "initial_heat": 120790,
+    "heat_history": [
+      {
+        "date": "2026-10-19",
+        "heat": 120790
+      }
+    ],
+    "source_url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1",
+    "checked": false,
+    "hit": null
   }
 ]

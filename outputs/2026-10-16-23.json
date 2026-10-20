@@ -1,0 +1,18 @@
+[
+  {
+    "term": "artex framework",
+    "source": "gsc_first_impression",
+    "heat": 2,
+    "intent": "other",
+    "commercial_score": 0,
+    "event_type": null,
+    "note": "GSC首次展现: https://yuliuswiki.com/ 近14天展现2次点击0次",
+    "source_url": "https://www.google.com/search?q=artex%20framework",
+    "jev": {
+      "is_product_tech": 0.62,
+      "intent": "tech_term",
+      "intent_confidence": 0.81,
+      "newsworthiness": 0.32
+    }
+  }
+]
