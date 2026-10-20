@@ -1,147 +1,178 @@
 # Trend Monitor (搜索新词监控)
 
-监控突发搜索新词与社区高频短语的自动化工具，旨在第一时间发现刚冒头的新趋势、新工具与热点事件。
+监控刚冒头的新产品 / 新技术 / 新模型，自动完成「发现 → 过滤 → Jev 打分 → 变现分流 → 排序输出」的自动化工具，并追踪每个词的推送状态、命中率与已建页面的收益/止损。
 
 ---
 
 ## 1. 功能简介
 
-1. **Google Trends（主数据源）**：
-   - 抓取美国区（US）Daily Trending Searches，获取 24 小时内热度飙升词与关联新闻。
-   - 调用 `interest_over_time` 查询候选词过去 7 天热度曲线，比对基线热度与 24 小时峰值，确认是“突然冒头”的新词，排除“长期高热度词”。
-   - 遇到 Google 接口限流（429）时自动降级依托 24h 榜单数据与官方 RSS 源。
+### 发现源（按优先级）
 
-2. **Reddit rising（辅助数据源）**：
-   - 抓取 Reddit `r/all/rising` 社区上升帖标题。
-   - 提取 2~4 词的高频短语并按得分聚合。
+1. **GitHub breakout**：抓取创建不足 14 天、日均涨星 200+ 或总星 400+ 的新仓库，仓库名即产品/技术新词；同一 org 一次推出 ≥3 个仓库时合并为套件级候选。
+2. **HuggingFace 新模型**：只用 `sort=trendingScore` 拉候选，只保留 `created_at` 在 7 天内的模型；一个模型一条结果（term = 模型名，去组织前缀、保留版本号）。媒体生成类 pipeline（文生视频/图生视频/文生图/图生图/文生语音）+ API 可用 + 许可证未明确禁止商用 → 标记 `event_type=new_model`。
+3. **Reddit rising**：抓取 `r/all/rising` 与技术区上升帖标题，提取 2~4 词高频短语。
+4. **GSC first-impression**：各站点近 14 天第一次有展现的 query（真实搜索需求，长尾选题）。
+5. **X (Twitter)**：Nitter 实例 / 社交搜索降级抓取，失败静默跳过。
 
-3. **智能过滤与意图分类**：
-   - **人名与八卦过滤**：使用 `PERSON_PATTERN` 正则结合 500+ 常见英文姓名库（名+姓结构）与上下文职务称谓（Coach, Senator, QB, Actor 等），直接过滤纯人名资讯与娱乐八卦（如大学橄榄球教练、政客等）。若事件中包含工具/产品/教程信号则豁免。
-   - **短语质量清洗**：通过 `USELESS_PHRASES` 黑名单与口语正则，彻底过滤纯寒暄与无意义短语（如 `good morning`, `really good`, `thank you`, `anyone else` 等）。
-   - **严格收紧意图判定 (`intent`)**：
-     - `tool`：仅在词本身或关联文本中包含明确工具信号词（如 `tool`, `converter`, `compressor`, `calculator`, `generator`, `download`, `template`, `app`, `software`, `online free` 等）时标记；绝不把人名标为 tool。
-     - `info`：包含明确资讯、赛况、发布、规格等信号词时标记。
-     - `other`：未匹配上述强意图的其他词汇。
+Google Trends **只做验证**（14 天命中率核验），不参与发现；核验时丢弃最近 2 天未结算数据。
 
-4. **自动化输出**：
-   - 结果保存至 `~/workspace/trend-monitor/outputs/YYYY-MM-DD-HH.json`（按北京时间 UTC+8 命名）。
+### 过滤与分类
+
+- 人名/八卦过滤（名+姓结构 + 500+ 姓名库 + 职务称谓上下文，含工具/产品信号时豁免）、寒暄黑名单短语过滤。
+- `intent` 意图判定（收紧规则）：`tool`（有明确工具信号词）、`info`（资讯信号词）、`other`。
+- `commercial_score` 商业价值分（0-10）；`event_type` 事件类型（new_model / product_launch / policy / gossip）。
+
+### Jev 打分层
+
+用 TypeSafe Jev 结构化决策模型给 top 候选打三维分：`is_product_tech`（0-1）、`intent`（paid_tool / tech_term / company / media_generation / generic）、`newsworthiness`（0-1）。
+
+- 打分前先按 `get_sort_key` 排序、再按来源分配名额（每来源至少 3 个，总数上限 `JEV_MAX_SCORE_PER_RUN=15`），避免靠后的来源整批拿不到分。
+- 上下文不只传 term：拼接来源、GitHub 仓库简介、HF 的 pipeline_tag/license、note（Reddit 原帖标题）、URL，截断 1500 字符。
+- 结果缓存进 seen_terms 条目（`jev` / `jev_scored_at` / `jev_model`）；7 天内且本轮无新证据（cooldown/repeat）时复用缓存，不重复调用。
+- 过滤：有有效评分且 `is_product_tech < JEV_PRODUCT_TECH_THRESHOLD`（0.6）的词丢弃；未打分的词照常放行，但带 `jev_status=unscored`。每条结果都标 `jev_status`（scored / cached / unscored）。
+- 健康监控：每轮统计 `jev_stats`（provider / attempted / succeeded / failed / cached）打印在运行汇报里，并落 `outputs/jev_health.json`（最近 5 轮）；连续 2 轮 succeeded=0 时汇报明确告警「Jev 打分失效，当前过滤为全部放行」。
+
+### 变现分流（classify_monetization）
+
+Jev 打分之后、排序之前，每个候选必须落到一条路线，结果写 `monetization_path` / `path_reason`，规则按顺序判断：
+
+| 顺序 | 条件 | 路线 | 后续动作 |
+| :--- | :--- | :--- | :--- |
+| 1 | `event_type=new_model` 且 `api_available` | `quick_paid_site` | 抢 48 小时窗口：积分制付费站 |
+| 2 | `intent=tool`，或 Jev intent ∈ {paid_tool, media_generation} | `tool_page` | 并入 yuliusbox 工具页 |
+| 3 | `intent=info`，或 Jev intent = tech_term | `content` | 写 yuliuswiki 文章 |
+| 4 | Jev intent = generic 且 newsworthiness < 0.4 | `reject` | 不输出，记入 last_filtered_reason |
+| 5 | 其余 | `watch` | 先观察 |
+
+汇报里 quick_paid_site 单独列在最前，带模型类型、api_available、license。
+
+### 自动化输出
+
+结果保存至 `outputs/YYYY-MM-DD-HH.json`（北京时间命名）。运行结束打印各来源条数、各路线条数与 jev_stats。
 
 ---
 
 ## 2. 依赖安装
 
-环境要求：Python 3.8+
+环境要求：Python 3.8+（`huggingface_hub` 用于 HuggingFace 来源；api_available 依赖其 `inferenceProviderMapping` 展开，1.33.0 已实测支持，不支持时自动降级为 null）。
 
 ```bash
-pip install pytrends requests pandas
+pip install pytrends requests pandas huggingface_hub
 ```
 
 ---
 
 ## 3. 运行方式
 
-直接运行监控脚本：
-
 ```bash
-python3 ~/workspace/trend-monitor/trend_watch.py
+python3 trend_watch.py            # 正常一轮:写输出 JSON 并更新全部状态
+python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen_terms / word_tracking / GSC 基线 / jev_health 都不动)
 ```
 
-执行后终端将输出抓取日志、过滤日志及生成的 JSON 结果。
+### 环境变量（Jev 配置）
+
+| 变量 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `JEV_PROVIDER` | `openrouter` | 打分通道：`openrouter` / `opencode_free` / `none` |
+| `OPENROUTER_API_KEY` | 无 | OpenRouter 密钥，**只从环境变量读取**，不写进代码、日志或输出 JSON（仓库 `.gitignore` 已覆盖 `.env`） |
+
+- `openrouter`：走 `POST https://openrouter.ai/api/alpha/decisions`，模型 `typesafe/jev-1.14`；**没有 key 或调用失败时自动回退 `opencode_free`**（OpenCode Zen 免费通道，模型 `jev-1.13-free`）；两者都失败时该条视为未打分（放行 + `jev_status=unscored`）。
+- `none`：完全不打分。
 
 ---
 
 ## 4. 输出格式说明
 
-输出文件保存在 `outputs/` 目录下，文件名为 `YYYY-MM-DD-HH.json`。格式为 JSON 数组，每个元素包含以下字段：
+输出文件为 JSON 数组（控制台 dashboard 依赖顶层数组结构），每个元素字段：
 
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `term` | string | 发现的候选新词 / 趋势短语 |
-| `source` | string | 数据源（`google_trends` 或 `reddit`） |
-| `heat` | string / int | 热度指标（Google 为近似搜索量如 `500+`、`1000+`；Reddit 为综合频次打分） |
-| `intent` | string | 搜索意图分类：`tool`（工具型）、`info`（资讯型）、`other`（其他） |
-| `commercial_score` | int | 商业价值分（0-10）：基于高价值信号词、意图加权（工具型+3/资讯型+1）及八卦人名惩罚综合计算 |
-| `event_type` | string / null | 事件类型标记：`product_launch`（新品/发布）、`policy`（政策/新规）、`gossip`（八卦/绯闻）或 `null` |
-| `note` | string | 飙升原因推测、7天基线与峰值对比、相关新闻事件或 Reddit 原帖标题 |
+| `term` | string | 候选新词 / 模型名 / 仓库名 |
+| `source` | string | 数据源：`github_breakout` / `huggingface` / `reddit` / `gsc_first_impression` / `x` |
+| `heat` | int | 热度数值（GitHub 为日均星数、HF 为 likes 与 downloads 综合、Reddit 为频次分、GSC 为展现数） |
+| `intent` | string | 本地意图：`tool` / `info` / `other` |
+| `commercial_score` | int | 商业价值分（0-10） |
+| `event_type` | string / null | `new_model`（-1）/ `product_launch`（0）/ `policy`（1）/ `gossip`（2）/ null（3），括号内为排序优先级 |
+| `note` | string | 证据说明（仓库星数、模型 pipeline/license、原帖标题等） |
+| `source_url` | string | 来源链接 |
+| `description` | string | （GitHub）仓库简介，供 Jev 上下文与人工判断 |
+| `jev` | object / 缺省 | Jev 打分：`{is_product_tech, intent, intent_confidence, newsworthiness}`，未打分时无此字段 |
+| `jev_status` | string | `scored` / `cached`（复用缓存）/ `unscored`（未打分） |
+| `monetization_path` | string | 变现路线：`quick_paid_site` / `tool_page` / `content` / `watch` |
+| `path_reason` | string | 路线判定理由 |
+| `hf_model_id` / `pipeline_tag` / `license` / `api_available` | | （仅 HuggingFace）模型全名、任务类型、许可证、Inference API 是否有 live provider（未知为 null） |
 
 ### 输出排序规则
 
-JSON 数组写入前按 `(event_type 优先级, commercial_score, heat)` 综合排序：
-1. **事件类型优先级（升序）**：`product_launch` (0) > `policy` (1) > `gossip` (2) > `null` (3)。
-2. **商业价值分（降序）**：`commercial_score` 高分优先。
-3. **热度数值（降序）**：解析 `heat` 数字部分转为整型（如 `'500+'` → `500`，`'N/A'` → `0`）后降序排列。
-
-### 已处理词状态管理机制（v2）
-
-- **状态库文件**：`~/workspace/trend-monitor/outputs/seen_terms.json`。
-- **设计变更**：seen_terms 不再是"推送过就永久跳过"的黑名单，而是**状态库**。每个词（同名不同产品拆成不同条目）一条状态记录：
-  - `first_seen_at` / `last_seen_at` / `seen_count`：首次发现、最近出现、累计出现次数
-  - `sources`：出现过的来源集合；`project_url`：项目地址（`source_url`）
-  - `last_heat` / `last_version`：最近一次热度数值与识别到的版本号
-  - `last_notified_at` / `last_notified_reason`：最近推送时间与原因（first_time / heat_surge / new_source / major_version / legacy_migration）
-  - `decision`（null / build / watch / reject）与 `published_url`：人工决策与发布结果，脚本不覆盖，由决策后回填
-- **推送判定**（`should_notify`）：
-  - 普通重复出现不推送。
-  - 首次发现直接推送；之后出现**重大版本**（主版本号变化）、**热度跃升**（≥ 上次 2 倍）或**新增独立来源**证据时可再提醒，且距上次推送须超过冷却期（`RENOTIFY_COOLDOWN_DAYS = 7` 天）。
-- **同名不同产品**：靠 `project_url` 核对，不只按小写词合并；同名不同仓库会拆成 `term`、`term#2` 等独立条目。
-- **迁移**：旧 v1 结构（`{first_seen, count}`）在首次运行时自动迁移到 v2，迁移前原文件备份为 `seen_terms.json.bak-<时间戳>`，数据不丢失。
-
-### 页面效果追踪
-
-- **文件**：`~/workspace/trend-monitor/hidden_files/page_tracking.json`，由 `page_tracking.py` 维护。
-- 每发布一个新词页面就记一条：选题词、上线 URL、决策理由、投入说明、收录状态（`deploying` → `sitemap_updated` → `index_checked` → `indexed`，只能人工/GSC 核实后推进），以及 7/14/28 天的 GSC 展现/点击/排名快照。
-- 用法：`python3 page_tracking.py add|update|gsc|list|show`（详见脚本 docstring）。
-
-### 示例输出：
-
-```json
-[
-  {
-    "term": "pdf converter online free",
-    "source": "google_trends",
-    "heat": "200+",
-    "intent": "tool",
-    "commercial_score": 6,
-    "event_type": "product_launch",
-    "note": "24小时内搜索量大幅异动；相关事件: New PDF tool launch"
-  },
-  {
-    "term": "georgia tech football",
-    "source": "google_trends",
-    "heat": "500+",
-    "intent": "info",
-    "commercial_score": 1,
-    "event_type": null,
-    "note": "7天基线热度: 12.3, 24h峰值: 100 (确认突然冒头)；相关事件: Georgia Tech secures upset win in college football"
-  }
-]
-```
+1. **变现路线优先级**：`quick_paid_site` (0) > `tool_page` (1) > `content` (2) > `watch` (3)。
+2. 路线内按 `get_sort_key`：`event_type` 优先级升序 → `commercial_score` 降序 → `heat` 降序。
 
 ---
 
-## 5. 定时运行建议
+## 5. 已处理词状态管理（seen_terms v2）
 
-建议通过 `cron` 每天定时运行 4 次（每 6 小时一次），以持续捕获全天不同时段的突发热词。
+- **状态库文件**：`outputs/seen_terms.json`，不再是黑名单而是状态库；同名不同产品按 `project_url` 拆成 `term`、`term#2` 独立条目。
+- 每条记录：`first_seen_at` / `last_seen_at` / `seen_count` / `sources` / `project_url` / `last_heat` / `last_version`（观测字段，每轮都更新）。
+- **推送落标时机**：`last_notified_at` / `last_notified_reason` 只在「Jev 过滤 + 变现分流 + 排序完成且输出 JSON 写入成功」之后，给最终输出的词写。被过滤的词写 `last_filtered_at` / `last_filtered_reason`，**不算推送**——下一轮凭新证据仍可再提醒（旧版本曾在过滤前就误标推送、吃掉 7 天冷却期，已修复）。
+- **推送判定**（`should_notify`）：普通重复不推送；首次发现直接推送；重大版本（主版本号变化）/ 热度跃升（≥ 上次 2 倍）/ 新增独立来源证据，且距上次推送超过冷却期（`RENOTIFY_COOLDOWN_DAYS = 7` 天）时再提醒。
+- **Jev 缓存**：条目内 `jev` / `jev_scored_at` / `jev_model` 存最近一次打分结果。
+- `decision`（null / build / watch / reject）与 `published_url` 由人工/上层流程回填，脚本不覆盖。
+- **迁移**：旧结构在 load 时自动迁移/补默认值，迁移前原文件备份为 `seen_terms.json.bak-<时间戳>`。
 
-编辑 crontab：
+---
+
+## 6. 命中率追踪（按路线区分）
+
+- **追踪库**：`hidden_files/word_tracking.json`，记录每个输出词的 `monetization_path`、发现时热度与热度历史。
+- 14 天后核验（`check_hit_rate`），报告落 `outputs/hit_rate_report.json` / `.md`：
+  - `content` / `tool_page`：沿用「14 天 Trends 热度翻倍」标准。
+  - `quick_paid_site`：**不用 Trends 判定**，报告里标注「以 page_tracking 第 7 天净收入为准」，不自动标记核验。
+  - 无路线的旧记录归入 `legacy` 组按原标准统计。
+- 报告含 `sources`（按来源）与 `paths`（按路线）两套分组。
+
+---
+
+## 7. 页面效果与收益追踪（page_tracking.py）
+
+- **文件**：`hidden_files/page_tracking.json`。每发布一个页面记一条：选题、URL、决策理由、投入、收录状态（`deploying` → `sitemap_updated` → `index_checked` → `indexed`，只能人工/GSC 核实后推进）、GSC 快照，以及变现字段：
+  - `site_type`：quick_paid_site / tool_page / content（旧记录默认 content）
+  - `costs`：`[{item, amount, date}]`；`revenue`：`[{date, gross, api_cost, fees, refunds}]`（本版手动录入，不接 Stripe API）
+  - `kill_by`：上线后第 7 天日期，`add` 时自动生成；`outcome`：running / killed / merged / kept；`merged_into`：并入目标 URL
+- 命令：
+  ```bash
+  python3 page_tracking.py add --term X --url URL --reason "..." [--site-type content]
+  python3 page_tracking.py update --term X [--status indexed] [--outcome kept] [--merged-into URL] [--site-type tool_page]
+  python3 page_tracking.py gsc --term X --date 2026-10-27 --impressions 120 --clicks 3 --position 8.5
+  python3 page_tracking.py revenue --term X --date 2026-10-27 --gross 99 --api-cost 12 --fees 3 --refunds 0
+  python3 page_tracking.py cost --term X --item 域名 --amount 68 [--date 2026-10-21]
+  python3 page_tracking.py pnl    # 按 site_type 汇总第 1/7/28 天净收入
+  python3 page_tracking.py list   # kill_by 到期且 running 的会提示到期复核
+  python3 page_tracking.py show --term X
+  ```
+- **pnl 口径**：净收入 = gross − api_cost − fees − refunds − 窗口内成本（上线后累计）。窗口内无收入、或从未录过成本的，显示「未知」，**不当作 0**。
+- **到期复核**：`list` 里 kill_by 已到期且 outcome=running 的页面会提示：净收入覆盖不了成本就 `killed`；搜索仍持续的就 `merged` 到 yuliusbox（用 update --outcome merged --merged-into 落标）。
+
+---
+
+## 8. 定时运行建议
+
+通过定时任务每 6 小时运行一轮（cron 频率不在本仓库代码内，由调度方配置，本次升级未改动）。
+
+---
+
+## 9. 测试
 
 ```bash
-crontab -e
+python3 -m unittest discover -s tests
 ```
 
-添加以下定时任务示例（每天 02:00, 08:00, 14:00, 20:00 运行）：
-
-```cron
-0 2,8,14,20 * * * /usr/bin/python3 /home/hatch/workspace/trend-monitor/trend_watch.py >> /home/hatch/workspace/trend-monitor/trend_watch.log 2>&1
-```
+覆盖：推送状态延后写入（第 1 项 bug 回归）、Jev 解析/通道回退/名额分配/缓存/健康告警、HuggingFace 新模型规则、变现分流每条规则、page_tracking 迁移与 pnl、命中率路线分组、seen/page 旧结构迁移。
 
 ---
 
-## 6. 已知限制
+## 10. 已知限制
 
-1. **X (Twitter) 趋势**：
-   - X 官方当前无免费公开的趋势 API，为避免硬爬带来的 IP 风控与不稳定性，目前标记为 TODO 并跳过。
-2. **人名过滤为启发式规则**：
-   - 过滤基于“名+姓结构正则 + 常见姓名库 + 上下文职务称谓”，对于极生僻的外国名字且新闻标题中没有任何职务关键词的情况，可能存在边缘判断误差。
-3. **Google Trends 频率限制**：
-   - Google Trends `interest_over_time` 接口对高频请求会返回 429 (TooManyRequestsError)。脚本已内置 1.2 秒请求节流与 24h 热榜及 RSS 降级容错机制。
+1. **人名过滤为启发式规则**：极生僻外国名且标题无职务关键词时可能有边缘误差。
+2. **Google Trends 频率限制**：命中率核验内置 1.2 秒节流；Trends 返回空时该词计未命中。
+3. **OpenCode 免费通道限流**：429 时该轮部分词未打分（unscored 放行），属预期降级；有 OpenRouter key 时优先走 OpenRouter。
+4. **X 信号源不稳定**：依赖公开 Nitter 实例，不可用时静默跳过。
