@@ -519,6 +519,13 @@ def get_sort_key(item: dict) -> tuple:
 #   last_version        最近一次识别到的版本号(如 "2.1")
 #   last_notified_at    最近一次推送时间(未推送过为 null)
 #   last_notified_reason first_time / heat_surge / new_source / major_version / legacy_migration
+#                       注意: 只有最终进入输出 JSON 的词才写这两个字段(写文件成功后),
+#                       被 Jev/变现分流过滤掉的词不算推送,写 last_filtered_*。
+#   last_filtered_at    最近一次被过滤(Jev 产品技术度 / 变现 reject)的时间
+#   last_filtered_reason 被过滤原因
+#   jev                 最近一次 Jev 打分结果缓存(dict 或 null)
+#   jev_scored_at       Jev 缓存打分时间(ISO)
+#   jev_model           Jev 缓存所用模型名
 #   decision            人工决策:null / build / watch / reject(由人工或上层流程回填,脚本不覆盖)
 #   published_url       已发布页面 URL(发布后回填,脚本不覆盖)
 
@@ -538,6 +545,11 @@ def _empty_seen_entry(now_iso=None) -> dict:
         'last_version': None,
         'last_notified_at': None,
         'last_notified_reason': None,
+        'last_filtered_at': None,
+        'last_filtered_reason': None,
+        'jev': None,
+        'jev_scored_at': None,
+        'jev_model': None,
         'decision': None,
         'published_url': None,
     }
@@ -650,6 +662,27 @@ def should_notify(item: dict, entry, now: datetime) -> tuple:
     if major is not None and last_major is not None and major != last_major:
         return True, 'major_version'
     return False, 'repeat_no_new_evidence'
+
+
+def mark_run_results(final_items: list, filtered_items: list, seen: dict, now_iso: str):
+    """输出 JSON 写入成功后才调用:给最终输出的词写 last_notified_*,
+    给被过滤掉的词写 last_filtered_*(不算推送,冷却期不拦它下次凭新证据再来)。
+
+    final_items: 进入输出 JSON 的候选项(带 _seen_key / _notify_reason 临时字段)
+    filtered_items: [(item, 过滤原因)] —— Jev 产品技术度过滤、变现分流 reject 的词
+    """
+    for item in final_items:
+        entry = seen.get(item.get('_seen_key') or '')
+        if entry is None:
+            continue
+        entry['last_notified_at'] = now_iso
+        entry['last_notified_reason'] = item.get('_notify_reason')
+    for item, reason in filtered_items:
+        entry = seen.get(item.get('_seen_key') or '')
+        if entry is None:
+            continue
+        entry['last_filtered_at'] = now_iso
+        entry['last_filtered_reason'] = reason
 
 
 def check_candidate(term: str, context: str = '') -> tuple:
@@ -1163,7 +1196,7 @@ def fetch_github_breakout():
 # ---------------------------------------------------------------------------
 # 数据源 5: GSC "第一次有展现" 新词 (Google Search Console Search Analytics)
 # ---------------------------------------------------------------------------
-def fetch_gsc_new_queries():
+def fetch_gsc_new_queries(update_baseline: bool = True):
     """GSC first-impression 新词发现：拉各站点近 14 天 query 数据，
     找出基线快照里从没出现过的新 query——这是真实用户搜到我们站的词，
     天然带搜索需求，直接做 yuliusbox 长尾页选题。
@@ -1234,12 +1267,15 @@ def fetch_gsc_new_queries():
                     continue
                 new_terms.append((site, q, m))
 
-    try:
-        os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
-        with open(baseline_path, "w", encoding="utf-8") as f:
-            json.dump(baseline, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[GSC] 基线写入失败: {e}")
+    if update_baseline:
+        try:
+            os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
+            with open(baseline_path, "w", encoding="utf-8") as f:
+                json.dump(baseline, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[GSC] 基线写入失败: {e}")
+    else:
+        print("[GSC] dry-run: 跳过基线写入")
 
     new_terms.sort(key=lambda t: -t[2]["impressions"])
     print(f"[GSC] 发现 {len(new_terms)} 个首次有展现的新 query")
@@ -1658,8 +1694,10 @@ def _write_hit_rate_report(output_dir: str, report: dict):
 # ---------------------------------------------------------------------------
 # 主流程与文件输出
 # ---------------------------------------------------------------------------
-def main():
+def main(dry_run: bool = False):
     print("=== 开始运行搜索新词监控 (trend_watch.py) ===")
+    if dry_run:
+        print("[dry-run] 本轮只写输出 JSON,不更新 seen_terms / word_tracking 等任何状态")
     all_candidates = []
 
     # 发现源优先级：GitHub breakout > HuggingFace > Reddit 技术区 > GSC 首次展现 > X（失败静默跳过）
@@ -1695,7 +1733,7 @@ def main():
 
     # 5. GSC 首次有展现的新 query（真实用户搜索，长尾页选题）
     try:
-        gsc_results = fetch_gsc_new_queries()
+        gsc_results = fetch_gsc_new_queries(update_baseline=not dry_run)
         all_candidates.extend(gsc_results)
     except Exception as e:
         print(f"[GSC] 处理发生未知异常: {e}")
@@ -1715,7 +1753,10 @@ def main():
 
     # 已处理词状态库:去重 + 再提醒判定(普通重复不推送,有新证据且过冷却期才再提醒)
     seen = load_seen_terms(seen_path)
-    if seen_needs_migration(seen):
+    needs_migration = seen_needs_migration(seen) or any(
+        isinstance(v, dict) and 'last_filtered_at' not in v for v in seen.values()
+    )
+    if needs_migration:
         backup_seen_terms(seen_path)
         seen = {k: migrate_seen_entry(v) for k, v in seen.items()}
         print(f"[状态库] seen_terms.json 已迁移到 v2 状态结构(共 {len(seen)} 条,旧文件已备份)")
@@ -1749,8 +1790,10 @@ def main():
         if not notify:
             print(f"[去重] 跳过词: {term}（{reason}）")
             continue
-        entry['last_notified_at'] = now_bj_iso
-        entry['last_notified_reason'] = reason
+        # 只挂临时字段;last_notified_* 等输出 JSON 写成功后才由 mark_run_results 落标,
+        # 避免被后续 Jev 过滤丢弃的词被误记为已推送、吃掉 7 天冷却期
+        item['_seen_key'] = key
+        item['_notify_reason'] = reason
         output_candidates.append(item)
 
     # Jev 打分层: 给 top 候选词加结构化评分(失败不阻塞)
@@ -1761,12 +1804,15 @@ def main():
 
     # Jev 产品技术度过滤: 有有效评分且 is_product_tech < 0.6 的直接丢弃
     # (yuliuswiki 只做产品技术类词；无评分的不拦截，避免 Jev 失败时误杀)
+    # 被丢弃的词收集到 filtered_items,输出写成功后写 last_filtered_*(不算推送)
     kept = []
+    filtered_items = []
     for c in output_candidates:
         j = c.get('jev') or {}
         pt = j.get('is_product_tech')
         if isinstance(pt, (int, float)) and pt < 0.6:
             print(f"[Jev过滤] 丢弃: {c.get('term')} (is_product_tech={pt:.2f})")
+            filtered_items.append((c, f"jev_product_tech={pt:.2f} < 0.6"))
             continue
         kept.append(c)
     print(f"[Jev过滤] {len(output_candidates)} -> {len(kept)}")
@@ -1775,21 +1821,35 @@ def main():
     # 按 (event_type 优先级, commercial_score, heat) 综合排序
     output_candidates.sort(key=get_sort_key)
 
-    # 写入 JSON 文件
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(output_candidates, f, ensure_ascii=False, indent=2)
-
-    # 保存 seen_terms.json
-    save_seen_terms(seen_path, seen)
-
-    # 命中率追踪：记录新发现候选词至 hidden_files/word_tracking.json
-    record_discovered_terms(output_candidates, tracking_path, now_bj_iso)
-
-    # 命中率核验：核验 14 天前的候选词并生成报告至 outputs/
+    # 写入 JSON 文件(剥掉 _ 开头的内部临时字段)
+    out_items = [
+        {k: v for k, v in it.items() if not k.startswith('_')}
+        for it in output_candidates
+    ]
     try:
-        check_hit_rate(tracking_path=tracking_path, output_dir=output_dir)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(out_items, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[命中率核验] 执行发生未知异常: {e}")
+        print(f"[输出] 写入 {output_path} 失败: {e},本轮不更新任何状态")
+        return
+
+    # 输出写成功后才落标:最终输出的词写 last_notified_*,被过滤的词写 last_filtered_*
+    if dry_run:
+        print(f"[dry-run] 跳过状态更新(本应标记 notified {len(output_candidates)} 个、filtered {len(filtered_items)} 个)")
+    else:
+        mark_run_results(output_candidates, filtered_items, seen, now_bj_iso)
+
+        # 保存 seen_terms.json
+        save_seen_terms(seen_path, seen)
+
+        # 命中率追踪：记录新发现候选词至 hidden_files/word_tracking.json
+        record_discovered_terms(out_items, tracking_path, now_bj_iso)
+
+        # 命中率核验：核验 14 天前的候选词并生成报告至 outputs/
+        try:
+            check_hit_rate(tracking_path=tracking_path, output_dir=output_dir)
+        except Exception as e:
+            print(f"[命中率核验] 执行发生未知异常: {e}")
 
     print(f"\n=== 监控完成 ===")
     print(f"有效候选新词总数: {len(output_candidates)}")
@@ -1797,8 +1857,16 @@ def main():
     print(f"去重库路径: {seen_path}")
     print(f"追踪库路径: {tracking_path}")
     print("\n--- 结果预览 ---")
-    print(json.dumps(output_candidates, ensure_ascii=False, indent=2))
+    print(json.dumps(out_items, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
-    main()
+    import argparse
+
+    _ap = argparse.ArgumentParser(description="搜索新词监控")
+    _ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只写输出 JSON,不更新 seen_terms / word_tracking / GSC 基线等任何状态",
+    )
+    main(dry_run=_ap.parse_args().dry_run)
