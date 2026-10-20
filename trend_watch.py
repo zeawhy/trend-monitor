@@ -1731,6 +1731,7 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
                 "initial_heat": heat,
                 "heat_history": [{"date": day, "heat": heat}],
                 "source_url": url,
+                "monetization_path": c.get('monetization_path'),
                 "checked": False,
                 "hit": None,
             }
@@ -1752,6 +1753,9 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
                 changed = True
             if url and not item.get("source_url"):
                 item["source_url"] = url
+                changed = True
+            if c.get('monetization_path') and not item.get('monetization_path'):
+                item['monetization_path'] = c['monetization_path']
                 changed = True
 
     if changed:
@@ -1792,6 +1796,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
                 "hit_rate": "0.0%"
             },
             "sources": {},
+            "paths": {},
             "evaluated_details": []
         }
         _write_hit_rate_report(output_dir, report)
@@ -1817,6 +1822,9 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     updated = False
     for item in eval_candidates:
         if item.get('checked'):
+            continue
+        # quick_paid_site 不用 Trends 判定,以 page_tracking 第 7 天净收入为准
+        if item.get('monetization_path') == 'quick_paid_site':
             continue
 
         term = item.get('term', '')
@@ -1883,6 +1891,26 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     for src, st in source_stats.items():
         st['hit_rate'] = f"{(st['hits'] / st['total'] * 100):.1f}%" if st['total'] > 0 else "0.0%"
 
+    # 按变现路线统计:content / tool_page 沿用 Trends 标准;quick_paid_site
+    # 不用 Trends 判定,标注以 page_tracking 第 7 天净收入为准;旧记录无路线记 legacy
+    path_stats = {}
+    for item in tracking_data:
+        p = item.get('monetization_path') or 'legacy'
+        if p not in path_stats:
+            path_stats[p] = {'total': 0, 'hits': 0, 'tracked': 0}
+        path_stats[p]['tracked'] += 1
+        if p == 'quick_paid_site' or not item.get('checked'):
+            continue
+        path_stats[p]['total'] += 1
+        if item.get('hit'):
+            path_stats[p]['hits'] += 1
+    for p, st in path_stats.items():
+        if p == 'quick_paid_site':
+            st['hit_rate'] = None
+            st['standard'] = '以 page_tracking 第 7 天净收入为准'
+        else:
+            st['hit_rate'] = f"{(st['hits'] / st['total'] * 100):.1f}%" if st['total'] > 0 else "0.0%"
+
     overall_rate = f"{(total_hits / total_evaluated * 100):.1f}%" if total_evaluated > 0 else "0.0%"
 
     report = {
@@ -1894,10 +1922,12 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
             "hit_rate": overall_rate
         },
         "sources": source_stats,
+        "paths": path_stats,
         "evaluated_details": [
             {
                 "term": it.get('term'),
                 "source": it.get('source'),
+                "monetization_path": it.get('monetization_path'),
                 "discovered_at": it.get('discovered_at'),
                 "heat_at_discovery": it.get('heat_at_discovery'),
                 "heat_after_14d": it.get('heat_after_14d'),
@@ -1941,6 +1971,18 @@ def _write_hit_rate_report(output_dir: str, report: dict):
             md_lines.append(f"| `{src}` | {st['total']} | {st['hits']} | **{st['hit_rate']}** |")
     else:
         md_lines.append("| 暂无数据 | 0 | 0 | 0.0% |")
+
+    md_lines.append("")
+    md_lines.append("## 各变现路线命中率统计")
+    paths = report.get('paths', {})
+    if paths:
+        md_lines.append("| 变现路线 (Path) | 追踪数 (Tracked) | 评估总数 (Total) | 命中数 (Hits) | 命中率 / 判定标准 |")
+        md_lines.append("| :--- | :--- | :--- | :--- | :--- |")
+        for p, st in paths.items():
+            rate = st.get('hit_rate') if st.get('hit_rate') is not None else st.get('standard', '以 page_tracking 第 7 天净收入为准')
+            md_lines.append(f"| `{p}` | {st.get('tracked', 0)} | {st['total']} | {st['hits']} | **{rate}** |")
+    else:
+        md_lines.append("暂无数据")
 
     md_lines.append("")
     md_lines.append("## 已核验词详情")
