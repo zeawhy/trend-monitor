@@ -1036,6 +1036,45 @@ def update_jev_health(stats: dict, run_at_iso: str, output_dir: str, dry_run: bo
 
 
 # ---------------------------------------------------------------------------
+# 变现分流 (classify_monetization)
+# Jev 打分之后、排序之前调用:每个候选必须落到一条变现路线上,
+# 路线决定后续动作与排序优先级:
+#   quick_paid_site  抢 48 小时窗口的积分制付费站(媒体生成新模型 + API 可用)
+#   tool_page        并入 yuliusbox 做工具页
+#   content          写 yuliuswiki 文章
+#   watch            先观察,不动手
+#   reject           不输出(记入 last_filtered_reason)
+# ---------------------------------------------------------------------------
+MONETIZATION_PATH_PRIORITY = {
+    'quick_paid_site': 0,
+    'tool_page': 1,
+    'content': 2,
+    'watch': 3,
+}
+MONETIZATION_GENERIC_NEWS_MAX = 0.4  # jev.intent=generic 且 newsworthiness 低于此值 → reject
+
+
+def classify_monetization(item: dict) -> tuple:
+    """给候选词定变现路线,返回 (monetization_path, path_reason),规则按顺序判断。"""
+    jev = item.get('jev') or {}
+    # 1. 媒体生成新模型且 API 可用 → 抢 48 小时窗口
+    if item.get('event_type') == 'new_model' and item.get('api_available'):
+        return 'quick_paid_site', '抢 48 小时窗口：积分制付费站（媒体生成新模型且 API 可用）'
+    # 2. 工具/付费意图 → yuliusbox 工具页
+    if item.get('intent') == 'tool' or jev.get('intent') in ('paid_tool', 'media_generation'):
+        return 'tool_page', '工具/付费意图明确，并入 yuliusbox 工具页'
+    # 3. 资讯/技术概念意图 → yuliuswiki 文章
+    if item.get('intent') == 'info' or jev.get('intent') == 'tech_term':
+        return 'content', '资讯/技术概念意图，写 yuliuswiki 文章'
+    # 4. Jev 判定 generic 且价值分低 → reject(不输出)
+    news = jev.get('newsworthiness')
+    if jev.get('intent') == 'generic' and isinstance(news, (int, float)) and news < MONETIZATION_GENERIC_NEWS_MAX:
+        return 'reject', f"jev_intent=generic 且 newsworthiness={news:.2f} < {MONETIZATION_GENERIC_NEWS_MAX}，无变现路线"
+    # 5. 其余先观察
+    return 'watch', '暂无明确变现路线，先观察'
+
+
+# ---------------------------------------------------------------------------
 # 数据源 2: Reddit rising
 # ---------------------------------------------------------------------------
 def extract_reddit_phrases(titles_with_scores):
@@ -2053,8 +2092,27 @@ def main(dry_run: bool = False):
     print(f"[Jev过滤] {len(output_candidates)} -> {len(kept)}")
     output_candidates = kept
 
-    # 按 (event_type 优先级, commercial_score, heat) 综合排序
-    output_candidates.sort(key=get_sort_key)
+    # 变现分流:Jev 打分后、排序前给每个候选定路线;reject 的不输出(记 filtered)
+    path_counts = {}
+    routed = []
+    for c in output_candidates:
+        path, path_reason = classify_monetization(c)
+        if path == 'reject':
+            print(f"[变现分流] reject: {c.get('term')}（{path_reason}）")
+            filtered_items.append((c, f"monetization_reject: {path_reason}"))
+            continue
+        c['monetization_path'] = path
+        c['path_reason'] = path_reason
+        path_counts[path] = path_counts.get(path, 0) + 1
+        routed.append(c)
+    output_candidates = routed
+    print(f"[变现分流] 各路线条数: {path_counts}")
+
+    # 排序:先路线优先级(quick_paid_site > tool_page > content > watch),再原 get_sort_key
+    output_candidates.sort(key=lambda it: (
+        MONETIZATION_PATH_PRIORITY.get(it.get('monetization_path'), 3),
+        get_sort_key(it),
+    ))
 
     # 写入 JSON 文件(剥掉 _ 开头的内部临时字段)
     out_items = [
@@ -2095,6 +2153,18 @@ def main(dry_run: bool = False):
 
     print(f"\n=== 监控完成 ===")
     print(f"有效候选新词总数: {len(output_candidates)}")
+    by_source = {}
+    for c in out_items:
+        src = c.get('source', 'unknown')
+        by_source[src] = by_source.get(src, 0) + 1
+    print(f"各来源条数: {by_source}")
+    print(f"各路线条数: {path_counts}")
+    quick = [c for c in out_items if c.get('monetization_path') == 'quick_paid_site']
+    if quick:
+        print("\n--- 🚀 quick_paid_site（抢 48 小时窗口：积分制付费站） ---")
+        for c in quick:
+            print(f"- {c.get('term')} | 模型类型: {c.get('pipeline_tag')} | "
+                  f"api_available: {c.get('api_available')} | license: {c.get('license')} | {c.get('source_url')}")
     print(f"输出文件路径: {output_path}")
     print(f"去重库路径: {seen_path}")
     print(f"追踪库路径: {tracking_path}")
