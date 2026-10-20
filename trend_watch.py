@@ -7,14 +7,18 @@ trend_watch.py - 新词监控脚本，用于发现刚冒头的搜索新词。
 功能:
     1. GitHub breakout（发现源）：抓取创建不足 14 天、日均涨星 200+ 或总星 400+ 的新仓库，
        仓库名即产品/技术新词。
-    2. HuggingFace 趋势模型（发现源）：用 huggingface_hub 公开免费 API 抓取 trending models（按 likes/downloads 排序，取最近 7 天发布/更新），提取 2-4 词关键词短语。
+    2. HuggingFace 新模型（发现源）：只用 trendingScore 拉候选，只保留 created_at 在 7 天内的
+       模型，一个模型一条结果（term=模型名）；媒体生成类 + API 可用 + 许可证未禁商用标 new_model。
     3. Reddit rising（发现源）：抓取 r/all/rising 帖子标题，提取 2-4 词关键词短语。
     4. X (Twitter) 趋势（发现源）：优先尝试 Nitter 公开实例与社交搜索降级抓取过去 8 小时高互动推文，提取产品名和技术名词；失败时静默跳过。
     5. Google Trends（仅验证源，不做发现）：14 天命中率核验时用 Trends 查词的持续热度；
        注意丢弃最近 2 天未结算数据，避免 0→100 假峰值误判。
     6. 过滤与分类：过滤纯人名八卦与无明确意图词，保留工具型（tool）或资讯型（info）意图的词。
     7. 命中率追踪：将新发现词写入 hidden_files/word_tracking.json；通过 check_hit_rate() 对 14 天前的词用 Google Trends 核验热度翻倍情况并输出报告。
-    8. Jev 打分层：用 TypeSafe Jev 结构化决策模型（经 OpenCode Zen 免费通道）给 top 候选词打三维分（是否产品/技术名、商业意图、新词价值），失败不阻塞。
+    8. Jev 打分层：用 TypeSafe Jev 结构化决策模型给候选词打三维分（是否产品/技术名、商业意图、
+       新词价值），通道由 JEV_PROVIDER 切换（openrouter 默认，无 key 回退 OpenCode Zen 免费通道），失败不阻塞。
+    9. 变现分流：Jev 后按 classify_monetization 把候选分到 quick_paid_site / tool_page /
+       content / watch（generic 低分直接 reject），排序时路线优先。
     9. 输出：生成 ~/workspace/trend-monitor/outputs/YYYY-MM-DD-HH.json（北京时间命名）。
 """
 
@@ -414,6 +418,7 @@ EXTRA_GOSSIP_PATTERNS = re.compile(
 )
 
 EVENT_TYPE_PRIORITY = {
+    'new_model': -1,
     'product_launch': 0,
     'policy': 1,
     'gossip': 2,
@@ -1152,122 +1157,134 @@ def fetch_reddit_rising():
 # ---------------------------------------------------------------------------
 # 数据源 3: HuggingFace 趋势模型 (Hugging Face Hub API)
 # ---------------------------------------------------------------------------
+HF_RECENT_DAYS = 7        # 只保留 created_at 在此天数内的新模型
+HF_MAX_RESULTS = 5        # 每轮最多输出条数
+HF_TRENDING_LIMIT = 50    # trendingScore 候选池大小
+HF_MEDIA_PIPELINE_TAGS = {
+    'text-to-video', 'image-to-video', 'text-to-image',
+    'image-to-image', 'text-to-speech',
+}
+# 明确禁止商用的许可证特征(命中才算"明确禁止";未知/other 不算禁止)
+_NONCOMMERCIAL_LICENSE_RE = re.compile(
+    r'(non[- ]?commercial|by-nc|[-_\s]nc\b|research[- ]only|no[- ]commercial)',
+    re.I,
+)
+
+
+def _license_blocks_commercial(license_str) -> bool:
+    """许可证是否明确禁止商用(只认明确的 NC / research-only 类表述)。"""
+    if not license_str:
+        return False
+    return bool(_NONCOMMERCIAL_LICENSE_RE.search(str(license_str)))
+
+
+def _hf_model_license(m):
+    """从模型卡 cardData.license 读许可证,缺失时回退 tags 里的 license: 前缀。"""
+    cd = getattr(m, 'card_data', None)
+    if cd:
+        d = cd.to_dict() if hasattr(cd, 'to_dict') else (cd if isinstance(cd, dict) else {})
+        lic = d.get('license')
+        if lic:
+            return str(lic)
+    for t in (getattr(m, 'tags', None) or []):
+        ts = str(t)
+        if ts.startswith('license:'):
+            return ts.split(':', 1)[1]
+    return None
+
+
 def fetch_huggingface_trending():
-    """抓取 Hugging Face trending models（按 likes/downloads 排序，取最近 7 天发布/更新的模型）。
-    从模型名和简介提取 2-4 词关键词短语，跟现有 Reddit 关键词提取逻辑保持一致。
+    """抓取 Hugging Face 新模型信号:只用 trendingScore 排序拉候选,只保留
+    created_at 在 7 天内的模型(不用 last_modified,避免老模型更新混入);
+    一个模型输出一条结果,term = 模型名(去组织前缀、保留版本号与连字符,
+    如 Wan2.5-T2V),不再把模型名/标签拆成 2-4 词泛短语。
+    媒体生成类 pipeline + API 可用 + 许可证未明确禁止商用 → event_type=new_model。
     """
     results = []
-    print("[HuggingFace] 开始抓取最近 7 天 trending models...")
+    print("[HuggingFace] 开始抓取 trendingScore 新模型...")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=HF_RECENT_DAYS)
     api = HfApi()
 
-    seen_ids = set()
-    all_models = []
-
-    # 按 trendingScore、likes、downloads 分别拉取候选模型，确保覆盖全面
-    for sort_key in ['trendingScore', 'likes', 'downloads']:
+    expand_fields = ['createdAt', 'pipeline_tag', 'cardData', 'likes', 'downloads']
+    # api_available: 先确认已装的 huggingface_hub 支持 inferenceProviderMapping
+    # 展开;不支持(抛错)就降级重试并把 api_available 置 None,不猜
+    api_available_supported = True
+    try:
+        models = list(api.list_models(
+            sort='trendingScore',
+            limit=HF_TRENDING_LIMIT,
+            expand=expand_fields + ['inferenceProviderMapping'],
+        ))
+    except Exception as e:
+        print(f"[HuggingFace] inferenceProviderMapping 展开不受支持({e}),降级重试,api_available 置 null")
+        api_available_supported = False
         try:
-            models_batch = list(api.list_models(
-                sort=sort_key,
-                limit=35,
-                expand=['lastModified', 'createdAt', 'likes', 'downloads', 'cardData']
+            models = list(api.list_models(
+                sort='trendingScore',
+                limit=HF_TRENDING_LIMIT,
+                expand=expand_fields,
             ))
-            for m in models_batch:
-                if m.id not in seen_ids:
-                    seen_ids.add(m.id)
-                    all_models.append(m)
-        except Exception as e:
-            print(f"[HuggingFace] 获取 sort={sort_key} 模型批次失败: {e}")
+        except Exception as e2:
+            print(f"[HuggingFace] 获取 trending 模型失败: {e2}")
+            return results
 
-    if not all_models:
+    if not models:
         print("[HuggingFace] 未获取到模型数据")
         return results
 
-    # 过滤出最近 7 天发布或更新的模型
-    recent_models = []
-    for m in all_models:
-        dt = m.last_modified or m.created_at
-        if dt and dt >= cutoff:
-            recent_models.append(m)
+    recent = [m for m in models if getattr(m, 'created_at', None) and m.created_at >= cutoff]
+    print(f"[HuggingFace] trendingScore 候选 {len(models)} 个,其中 created_at 在 {HF_RECENT_DAYS} 天内的 {len(recent)} 个")
 
-    print(f"[HuggingFace] 获取到 {len(all_models)} 个候选模型，其中最近 7 天活跃模型共 {len(recent_models)} 个")
+    for m in recent:
+        model_name = (m.id or '').split('/')[-1]
+        if not model_name:
+            continue
+        pipeline_tag = getattr(m, 'pipeline_tag', None)
+        license_str = _hf_model_license(m)
 
-    if not recent_models:
-        return results
+        if api_available_supported:
+            ipm = getattr(m, 'inference_provider_mapping', None)
+            if ipm is None:
+                api_available = None
+            else:
+                api_available = any(getattr(x, 'status', None) == 'live' for x in ipm)
+        else:
+            api_available = None
 
-    # 按 likes 和 downloads 综合排序（高关注/高使用优先）
-    recent_models.sort(
-        key=lambda m: max(m.likes or 0, (m.downloads or 0) // 100),
-        reverse=True
-    )
+        heat = max(m.likes or 0, (m.downloads or 0) // 100, 1)
+        context = f"huggingface model {m.id} pipeline:{pipeline_tag or ''} license:{license_str or ''}"
 
-    # 准备提取语料：模型名 + 简介 (description/summary) + pipeline_tag + tags
-    texts_with_scores = []
-    mid_by_text = {}
-
-    for m in recent_models:
-        likes = m.likes or 0
-        downloads = m.downloads or 0
-        # 热度打分权重综合点赞数与下载量
-        score = max(likes, downloads // 100, 1)
-
-        clean_id = m.id.split('/')[-1].replace('-', ' ').replace('_', ' ')
-        desc_parts = [clean_id]
-
-        if m.card_data:
-            cd = m.card_data.to_dict() if hasattr(m.card_data, 'to_dict') else (m.card_data if isinstance(m.card_data, dict) else {})
-            # 模型卡简介文本
-            if cd.get('description'):
-                desc_parts.append(str(cd['description']))
-            if cd.get('summary'):
-                desc_parts.append(str(cd['summary']))
-            # 任务流水线分类
-            if cd.get('pipeline_tag'):
-                desc_parts.append(str(cd['pipeline_tag']).replace('-', ' '))
-            # 标签特征词
-            if cd.get('tags') and isinstance(cd['tags'], list):
-                tags_clean = [
-                    str(t).replace('-', ' ') for t in cd['tags'][:8]
-                    if not str(t).startswith(('license:', 'region:', 'arxiv:'))
-                ]
-                desc_parts.append(' '.join(tags_clean))
-
-        text = ' '.join(desc_parts)
-        texts_with_scores.append((text, score))
-        mid_by_text[text] = m.id
-
-    # 复用与 Reddit 相同的 2-4 词关键词短语提取逻辑
-    phrase_scores, phrase_sample = extract_reddit_phrases(texts_with_scores)
-
-    # 筛选合格候选词并计算商业分与意图
-    for phrase, score in phrase_scores.most_common(30):
-        sample_text = phrase_sample.get(phrase, '')
-        valid, reason = check_candidate(phrase, sample_text)
+        valid, reason = check_candidate(model_name, context)
         if not valid:
-            print(f"[HuggingFace] 过滤掉{reason}: {phrase}")
+            print(f"[HuggingFace] 过滤掉{reason}: {model_name}")
             continue
 
-        intent = classify_intent(phrase, sample_text)
-        # 过滤无意图的单泛词
-        if intent == 'other' and len(phrase.split()) < 2:
-            continue
-
-        commercial_score = score_commercial(phrase, sample_text, intent=intent)
-        event_type = classify_event_type(phrase, sample_text)
-        sample_mid = mid_by_text.get(sample_text, '')
+        intent = classify_intent(model_name, context)
+        commercial_score = score_commercial(model_name, context, intent=intent)
+        event_type = classify_event_type(model_name, context)
+        if (
+            pipeline_tag in HF_MEDIA_PIPELINE_TAGS
+            and api_available
+            and not _license_blocks_commercial(license_str)
+        ):
+            event_type = 'new_model'
 
         results.append({
-            "term": phrase,
+            "term": model_name,
             "source": "huggingface",
-            "heat": score,
+            "heat": heat,
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"HuggingFace近7天高热模型关联词，来自模型 {sample_mid}",
-            "source_url": f"https://huggingface.co/{sample_mid}" if sample_mid else "",
+            "note": f"HuggingFace 近{HF_RECENT_DAYS}天新模型 {m.id}(pipeline_tag={pipeline_tag}, license={license_str}, api_available={api_available})",
+            "source_url": f"https://huggingface.co/{m.id}",
+            "hf_model_id": m.id,
+            "pipeline_tag": pipeline_tag,
+            "license": license_str,
+            "api_available": api_available,
         })
-        if len(results) >= 5:
+        if len(results) >= HF_MAX_RESULTS:
             break
 
     print(f"[HuggingFace] 抓取完成，产出 {len(results)} 个合格新词")
