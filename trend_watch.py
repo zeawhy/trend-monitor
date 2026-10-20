@@ -19,6 +19,7 @@ trend_watch.py - 新词监控脚本，用于发现刚冒头的搜索新词。
 """
 
 import os
+import shutil
 import sys
 import re
 import time
@@ -502,6 +503,79 @@ def get_sort_key(item: dict) -> tuple:
     return (prio, -c_score, -h_val)
 
 
+# ===================== seen_terms 状态管理 (v2) =====================
+# seen_terms.json 不再是"推送过就永久跳过"的黑名单,而是状态库:
+# 每个词(或同名不同产品)一条状态记录,保存首次/最近发现时间、来源集合、
+# 通知历史、人工决策与发布结果。普通重复出现不推送;出现重大版本、热度跃升
+# 或新增独立来源证据时,过了冷却期可再次提醒。
+#
+# 状态字段:
+#   first_seen_at       首次发现时间(ISO,北京时间)
+#   last_seen_at        最近一次出现时间
+#   seen_count          累计出现次数
+#   sources             出现过的来源集合(source 字段值)
+#   project_url         项目地址(source_url),同名不同产品靠它区分
+#   last_heat           最近一次热度数值(parse_heat 后)
+#   last_version        最近一次识别到的版本号(如 "2.1")
+#   last_notified_at    最近一次推送时间(未推送过为 null)
+#   last_notified_reason first_time / heat_surge / new_source / major_version / legacy_migration
+#   decision            人工决策:null / build / watch / reject(由人工或上层流程回填,脚本不覆盖)
+#   published_url       已发布页面 URL(发布后回填,脚本不覆盖)
+
+RENOTIFY_COOLDOWN_DAYS = 7      # 再提醒冷却时间(天)
+HEAT_SURGE_MULTIPLIER = 2.0     # 热度跃升判定倍数
+_VERSION_RE = re.compile(r'\bv?(\d+)\.(\d+)(?:\.(\d+))?\b', re.IGNORECASE)
+
+
+def _empty_seen_entry(now_iso=None) -> dict:
+    return {
+        'first_seen_at': now_iso,
+        'last_seen_at': now_iso,
+        'seen_count': 0,
+        'sources': [],
+        'project_url': None,
+        'last_heat': 0,
+        'last_version': None,
+        'last_notified_at': None,
+        'last_notified_reason': None,
+        'decision': None,
+        'published_url': None,
+    }
+
+
+def migrate_seen_entry(entry) -> dict:
+    """把 v1 结构 {first_seen, count} 迁移到 v2 状态字段;已是 v2 的只补齐缺失字段。"""
+    if not isinstance(entry, dict):
+        entry = {}
+    if 'first_seen_at' in entry:
+        merged = _empty_seen_entry(entry.get('first_seen_at'))
+        merged.update(entry)
+        return merged
+    first = entry.get('first_seen')
+    migrated = _empty_seen_entry(first)
+    migrated['last_seen_at'] = first
+    migrated['seen_count'] = entry.get('count', 0) or 0
+    # v1 语义:能进 seen_terms 就等于当年被输出/通知过
+    migrated['last_notified_at'] = first
+    migrated['last_notified_reason'] = 'legacy_migration'
+    return migrated
+
+
+def seen_needs_migration(data: dict) -> bool:
+    return any(isinstance(v, dict) and 'first_seen_at' not in v for v in data.values())
+
+
+def backup_seen_terms(path: str):
+    """迁移前备份旧 seen_terms.json,返回备份路径"""
+    if os.path.exists(path):
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+        bak = f"{path}.bak-{stamp}"
+        shutil.copy2(path, bak)
+        print(f"[状态库] 已备份旧 seen_terms.json -> {bak}")
+        return bak
+    return None
+
+
 def load_seen_terms(path: str) -> dict:
     """加载已推送历史词库"""
     if os.path.exists(path):
@@ -522,9 +596,60 @@ def save_seen_terms(path: str, data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def should_skip(term: str, seen: dict) -> bool:
-    """检查词是否已在推送历史中"""
-    return term.strip().lower() in seen
+def resolve_seen_key(term: str, project_url: str, seen: dict) -> str:
+    """同名词条的 key:同一产品按 project_url 对齐;同名但项目地址不同的产品
+    拆成 base、base#2、base#3…,不再只靠小写词粗暴合并。"""
+    base = term.strip().lower()
+    if not project_url:
+        return base
+    n = 1
+    while True:
+        key = base if n == 1 else f"{base}#{n}"
+        entry = seen.get(key)
+        if entry is None:
+            return key
+        if (entry.get('project_url') or '') == project_url:
+            return key
+        n += 1
+
+
+def extract_version(text: str):
+    """从词或说明文本里抽版本号,返回 (主版本 int 或 None, 版本串如 '2.1' 或 None)"""
+    if not text:
+        return None, None
+    m = _VERSION_RE.search(text)
+    if not m:
+        return None, None
+    return int(m.group(1)), m.group(0).lstrip('vV')
+
+
+def should_notify(item: dict, entry, now: datetime) -> tuple:
+    """判断本轮是否要推送该词,返回 (是否推送, 原因)。
+    普通重复不推送;首次发现,或出现重大版本 / 热度跃升 / 新增独立来源证据,
+    且距上次推送已过冷却期,才再次提醒。"""
+    if entry is None or not entry.get('last_notified_at'):
+        return True, 'first_time'
+    try:
+        last_notified = datetime.fromisoformat(entry['last_notified_at'])
+    except Exception:
+        return True, 'first_time'
+    if now - last_notified < timedelta(days=RENOTIFY_COOLDOWN_DAYS):
+        return False, 'cooldown'
+    # 热度跃升:本轮热度达到上次记录的 HEAT_SURGE_MULTIPLIER 倍
+    last_heat = entry.get('last_heat') or 0
+    cur_heat = parse_heat(item.get('heat', 0))
+    if last_heat > 0 and cur_heat >= last_heat * HEAT_SURGE_MULTIPLIER:
+        return True, 'heat_surge'
+    # 新增独立来源证据
+    src = item.get('source')
+    if src and src not in (entry.get('sources') or []):
+        return True, 'new_source'
+    # 重大版本:主版本号变化
+    major, _ver = extract_version(f"{item.get('term', '')} {item.get('note', '')}")
+    last_major, _ = extract_version(entry.get('last_version') or '')
+    if major is not None and last_major is not None and major != last_major:
+        return True, 'major_version'
+    return False, 'repeat_no_new_evidence'
 
 
 def check_candidate(term: str, context: str = '') -> tuple:
@@ -1588,23 +1713,45 @@ def main():
     seen_path = os.path.join(output_dir, "seen_terms.json")
     tracking_path = os.path.join(base_dir, "hidden_files", "word_tracking.json")
 
-    # 已处理词去重
+    # 已处理词状态库:去重 + 再提醒判定(普通重复不推送,有新证据且过冷却期才再提醒)
     seen = load_seen_terms(seen_path)
+    if seen_needs_migration(seen):
+        backup_seen_terms(seen_path)
+        seen = {k: migrate_seen_entry(v) for k, v in seen.items()}
+        print(f"[状态库] seen_terms.json 已迁移到 v2 状态结构(共 {len(seen)} 条,旧文件已备份)")
     output_candidates = []
 
     for item in all_candidates:
         term = item.get('term', '')
-        if should_skip(term, seen):
-            print(f"[去重] 跳过已推送词: {term}")
-            continue
+        project_url = item.get('source_url') or ''
+        key = resolve_seen_key(term, project_url, seen)
+        entry = seen.get(key)
+        notify, reason = should_notify(item, entry, now_bj)
 
-        term_lower = term.strip().lower()
+        if entry is None:
+            entry = _empty_seen_entry(now_bj_iso)
+            seen[key] = entry
+        # 无论本轮是否推送,都更新状态(决策/发布字段由人工回填,这里不覆盖)
+        entry['last_seen_at'] = now_bj_iso
+        entry['seen_count'] = (entry.get('seen_count') or 0) + 1
+        src = item.get('source')
+        if src and src not in (entry.get('sources') or []):
+            entry.setdefault('sources', []).append(src)
+        if project_url and not entry.get('project_url'):
+            entry['project_url'] = project_url
+        cur_heat = parse_heat(item.get('heat', 0))
+        if cur_heat:
+            entry['last_heat'] = cur_heat
+        _maj, _ver = extract_version(f"{term} {item.get('note', '')}")
+        if _ver:
+            entry['last_version'] = _ver
+
+        if not notify:
+            print(f"[去重] 跳过词: {term}（{reason}）")
+            continue
+        entry['last_notified_at'] = now_bj_iso
+        entry['last_notified_reason'] = reason
         output_candidates.append(item)
-        prev_count = seen.get(term_lower, {}).get('count', 0)
-        seen[term_lower] = {
-            'first_seen': seen.get(term_lower, {}).get('first_seen', now_bj_iso),
-            'count': prev_count + 1
-        }
 
     # Jev 打分层: 给 top 候选词加结构化评分(失败不阻塞)
     try:

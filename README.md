@@ -71,14 +71,26 @@ JSON 数组写入前按 `(event_type 优先级, commercial_score, heat)` 综合�
 2. **商业价值分（降序）**：`commercial_score` 高分优先。
 3. **热度数值（降序）**：解析 `heat` 数字部分转为整型（如 `'500+'` → `500`，`'N/A'` → `0`）后降序排列。
 
-### 已处理词去重机制
+### 已处理词状态管理机制（v2）
 
-- **历史词库文件**：`~/workspace/trend-monitor/outputs/seen_terms.json`。
-- **存储结构**：`{term_lower: {"first_seen": "ISO8601时间", "count": 推送次数}}`。
-- **去重逻辑**：
-  - 启动时加载 `seen_terms.json`。
-  - 遍历抓取候选词，若小写词已存在于历史库中，则记录日志 `[去重] 跳过已推送词: xxx` 并从本次输出中排除。
-  - 未推送过的新词加入本次输出结果，并在历史库中记录北京时间（UTC+8）ISO8601 时间戳及更新累计出现次数，监控流程结束后统一保存回磁盘。
+- **状态库文件**：`~/workspace/trend-monitor/outputs/seen_terms.json`。
+- **设计变更**：seen_terms 不再是"推送过就永久跳过"的黑名单，而是**状态库**。每个词（同名不同产品拆成不同条目）一条状态记录：
+  - `first_seen_at` / `last_seen_at` / `seen_count`：首次发现、最近出现、累计出现次数
+  - `sources`：出现过的来源集合；`project_url`：项目地址（`source_url`）
+  - `last_heat` / `last_version`：最近一次热度数值与识别到的版本号
+  - `last_notified_at` / `last_notified_reason`：最近推送时间与原因（first_time / heat_surge / new_source / major_version / legacy_migration）
+  - `decision`（null / build / watch / reject）与 `published_url`：人工决策与发布结果，脚本不覆盖，由决策后回填
+- **推送判定**（`should_notify`）：
+  - 普通重复出现不推送。
+  - 首次发现直接推送；之后出现**重大版本**（主版本号变化）、**热度跃升**（≥ 上次 2 倍）或**新增独立来源**证据时可再提醒，且距上次推送须超过冷却期（`RENOTIFY_COOLDOWN_DAYS = 7` 天）。
+- **同名不同产品**：靠 `project_url` 核对，不只按小写词合并；同名不同仓库会拆成 `term`、`term#2` 等独立条目。
+- **迁移**：旧 v1 结构（`{first_seen, count}`）在首次运行时自动迁移到 v2，迁移前原文件备份为 `seen_terms.json.bak-<时间戳>`，数据不丢失。
+
+### 页面效果追踪
+
+- **文件**：`~/workspace/trend-monitor/hidden_files/page_tracking.json`，由 `page_tracking.py` 维护。
+- 每发布一个新词页面就记一条：选题词、上线 URL、决策理由、投入说明、收录状态（`deploying` → `sitemap_updated` → `index_checked` → `indexed`，只能人工/GSC 核实后推进），以及 7/14/28 天的 GSC 展现/点击/排名快照。
+- 用法：`python3 page_tracking.py add|update|gsc|list|show`（详见脚本 docstring）。
 
 ### 示例输出：
 
