@@ -718,101 +718,316 @@ def is_valid_candidate(term: str, context: str = '') -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Jev 打分层 (经 OpenCode Zen 免费通道)
-# 用 TypeSafe Jev 结构化决策模型给候选词打三维分:
-#   is_product_tech (noul): 是否具体产品/技术名
-#   commercial_intent (choice): paid_tool / tech_term / company / generic
+# Jev 打分层 (结构化决策模型 TypeSafe Jev)
+# 用 Jev 给候选词打三维分:
+#   is_product_tech (noul 0-1): 是否具体产品/技术名
+#   intent (choice): paid_tool / tech_term / company / media_generation / generic
 #   newsworthiness (score 0-1): 建站价值
+# 通道可切换(JEV_PROVIDER 环境变量):
+#   openrouter(默认): OpenRouter Decisions API,模型 typesafe/jev-1.14,
+#                     密钥只读环境变量 OPENROUTER_API_KEY;无 key 或调用失败
+#                     自动回退 opencode_free
+#   opencode_free:    OpenCode Zen 免费通道(原有通道,匿名 public key)
+#   none:             不打分,全部词 jev_status=unscored 放行
 # 注意:
-#   - 走 https://opencode.ai/zen/v1/systemone, 用匿名 public key (2026-10-11 实测可用)
 #   - OpenCode 会拦 Python-urllib 默认 UA, 必须伪装 User-Agent
-#   - 失败时静默返回 None, 绝不阻塞主流程
+#   - 失败时静默返回 None, 绝不阻塞主流程;密钥不进代码/日志/输出
 # ---------------------------------------------------------------------------
+JEV_PROVIDER = os.environ.get("JEV_PROVIDER", "openrouter").strip().lower()
+JEV_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
+JEV_OPENROUTER_MODEL = "typesafe/jev-1.14"
 JEV_ENDPOINT = "https://opencode.ai/zen/v1/systemone"
 JEV_MODEL = "jev-1.13-free"
-JEV_MAX_SCORE_PER_RUN = 15  # 每轮最多打分词数, 控制耗时
+JEV_MAX_SCORE_PER_RUN = 15       # 每轮最多打分词数, 控制耗时
+JEV_PER_SOURCE_MIN = 3           # 打分名额按来源分配时,每来源至少保留的名额
+JEV_PRODUCT_TECH_THRESHOLD = 0.6 # is_product_tech 低于此值丢弃(可配置常量)
+JEV_CACHE_TTL_DAYS = 7           # Jev 结果缓存有效期(天)
+JEV_STATE_MAX_CHARS = 1500       # 传给 Jev 的上下文最大长度
 
 
-def score_with_jev(term: str, timeout: float = 30.0) -> dict | None:
-    """用 Jev 给单个候选词打分, 失败返回 None(调用方直接跳过)。"""
-    import urllib.request
-
-    payload = {
-        "model": JEV_MODEL,
-        "state": term,
-        "questions": {
-            "is_product_tech": {
-                "type": "noul",
-                "instructions": (
-                    "Is this term a specific product name, technology, tool, "
-                    "framework, model, or company — rather than a generic word "
-                    "or common phrase? Answer yes only if it names something concrete."
-                ),
-            },
-            "intent": {
-                "type": "choice",
-                "instructions": "What is the commercial nature of this term?",
-                "criteria": {
-                    "paid_tool": "A specific tool, SaaS, app, or service users would pay for or sign up to use",
-                    "tech_term": "A technical concept, framework, model, or standard with no direct paid product",
-                    "company": "A company or organization name",
-                    "generic": "A generic word, meme, event, or phrase with no clear commercial angle",
-                },
-            },
-            "newsworthiness": {
-                "type": "score",
-                "instructions": (
-                    "How valuable is this as a 'new trending keyword' for building "
-                    "a niche tool/information site around? Consider: novelty, "
-                    "search-intent clarity, low-competition potential."
-                ),
-                "criteria": ["Low", "Medium", "High", "Exceptional"],
+def _jev_questions() -> dict:
+    """Jev 问题集(两个通道共用同一份,保证结果结构一致)。"""
+    return {
+        "is_product_tech": {
+            "type": "noul",
+            "instructions": (
+                "Is this term a specific product name, technology, tool, "
+                "framework, model, or company — rather than a generic word "
+                "or common phrase? Answer yes only if it names something concrete."
+            ),
+        },
+        "intent": {
+            "type": "choice",
+            "instructions": "What is the commercial nature of this term?",
+            "criteria": {
+                "paid_tool": "A specific tool, SaaS, app, or service users would pay for or sign up to use",
+                "tech_term": "A technical concept, framework, model, or standard with no direct paid product",
+                "company": "A company or organization name",
+                "media_generation": "An AI model or service that generates images, video, or audio/speech, which users may pay for per use or with credits",
+                "generic": "A generic word, meme, event, or phrase with no clear commercial angle",
             },
         },
+        "newsworthiness": {
+            "type": "score",
+            "instructions": (
+                "How valuable is this as a 'new trending keyword' for building "
+                "a niche tool/information site around? Consider: novelty, "
+                "search-intent clarity, low-competition potential."
+            ),
+            "criteria": ["Low", "Medium", "High", "Exceptional"],
+        },
     }
+
+
+def _as_float(v):
+    return float(v) if isinstance(v, (int, float)) else None
+
+
+def _normalize_score(answer: dict):
+    """把 Jev score 型答案归一化到 0-1。
+    Decisions API 可能返回原始刻度值(如 2.38 / legend 0..3),System One
+    通道实测返回 0-1;只对越界值(>1)按 legend 最大刻度(缺省 3)缩放,
+    0-1 内的值原样保留,与旧行为兼容。"""
+    s = answer.get("score")
+    if not isinstance(s, (int, float)):
+        return None
+    s = float(s)
+    if s > 1.0:
+        max_idx = None
+        legend = answer.get("legend")
+        if isinstance(legend, dict) and legend:
+            try:
+                max_idx = max(float(k) for k in legend.keys())
+            except Exception:
+                max_idx = None
+        if not max_idx:
+            max_idx = 3.0  # criteria 共 4 档: Low/Medium/High/Exceptional
+        if max_idx > 0:
+            s = s / max_idx
+    return max(0.0, min(1.0, s))
+
+
+def _parse_jev_answers(data) -> dict | None:
+    """把 Jev 原始返回统一成 {is_product_tech, intent, intent_confidence, newsworthiness}。
+    返回为空/结构不对时返回 None(视为本条未打分)。"""
+    if not isinstance(data, dict):
+        return None
+    answers = data.get("answers") or {}
+    if not isinstance(answers, dict) or not answers:
+        return None
+    is_pt = answers.get("is_product_tech") or {}
+    intent = answers.get("intent") or {}
+    news = answers.get("newsworthiness") or {}
+    return {
+        "is_product_tech": _as_float(is_pt.get("noul")),
+        "intent": intent.get("choice"),
+        "intent_confidence": _as_float(intent.get("confidence")),
+        "newsworthiness": _normalize_score(news) if isinstance(news, dict) else None,
+    }
+
+
+def _jev_post(endpoint: str, model: str, api_key: str, state: str, timeout: float, label: str) -> dict | None:
+    """向 Jev 接口发一次请求并解析;失败返回 None。密钥只进请求头,不打印。"""
+    import urllib.request
+
+    payload = {"model": model, "state": state, "questions": _jev_questions()}
     try:
         req = urllib.request.Request(
-            JEV_ENDPOINT,
+            endpoint,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": "Bearer public",
+                "Authorization": f"Bearer {api_key}",
                 "User-Agent": "curl/8.0",
             },
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        answers = data.get("answers", {})
-        is_pt = answers.get("is_product_tech", {})
-        intent = answers.get("intent", {})
-        news = answers.get("newsworthiness", {})
-        return {
-            "is_product_tech": is_pt.get("noul"),
-            "intent": intent.get("choice"),
-            "intent_confidence": intent.get("confidence"),
-            "newsworthiness": news.get("score"),
-        }
+        return _parse_jev_answers(data)
     except Exception as e:
-        print(f"[Jev] 打分失败({term}): {e}")
+        print(f"[Jev] {label} 打分失败: {e}")
         return None
 
 
-def enrich_with_jev(candidates: list) -> list:
-    """给候选词批量加 Jev 打分, 失败/超限的词保留原样不阻塞。
+def _jev_via_opencode(state: str, timeout: float = 30.0):
+    """OpenCode Zen 免费通道(现有通道)。返回 (jev_dict|None, model|None)。"""
+    r = _jev_post(JEV_ENDPOINT, JEV_MODEL, "public", state, timeout, "opencode_free")
+    return (r, JEV_MODEL) if r else (None, None)
 
-    只给前 JEV_MAX_SCORE_PER_RUN 个词打分(按现有排序), 控制单轮耗时。
-    """
-    for item in candidates[:JEV_MAX_SCORE_PER_RUN]:
-        term = item.get("term", "")
-        if not term:
+
+def score_with_jev_state(state: str, timeout: float = 30.0):
+    """按 JEV_PROVIDER 走通道链给一段上下文打分,返回 (jev_dict|None, model|None)。
+    openrouter 无 key 或调用失败 → 自动回退 opencode_free;都失败 → (None, None)。"""
+    if JEV_PROVIDER == "none":
+        return None, None
+    if JEV_PROVIDER == "openrouter":
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if api_key:
+            r = _jev_post(
+                JEV_OPENROUTER_ENDPOINT, JEV_OPENROUTER_MODEL, api_key,
+                state, timeout, "openrouter",
+            )
+            if r:
+                return r, JEV_OPENROUTER_MODEL
+            print("[Jev] OpenRouter 通道失败,回退 opencode_free")
+        else:
+            print("[Jev] 未配置 OPENROUTER_API_KEY,回退 opencode_free")
+        return _jev_via_opencode(state, timeout)
+    if JEV_PROVIDER != "opencode_free":
+        print(f"[Jev] 未知 JEV_PROVIDER={JEV_PROVIDER},按 opencode_free 处理")
+    return _jev_via_opencode(state, timeout)
+
+
+def score_with_jev(term: str, timeout: float = 30.0) -> dict | None:
+    """用 Jev 给单个候选词打分(仅 term 作上下文,兼容旧调用),失败返回 None。"""
+    jev, _model = score_with_jev_state(term, timeout=timeout)
+    return jev
+
+
+def build_jev_state(item: dict) -> str:
+    """给 Jev 的上下文:不再只传 term,拼接来源、简介、note(含 Reddit 原帖标题)、
+    HF 的 pipeline_tag/license、来源链接等证据,总长度截断到约 1500 字符。"""
+    parts = [f"Term: {item.get('term', '')}"]
+    if item.get('source'):
+        parts.append(f"Source: {item['source']}")
+    if item.get('description'):
+        parts.append(f"Description: {item['description']}")
+    if item.get('pipeline_tag'):
+        parts.append(f"Pipeline: {item['pipeline_tag']}")
+    if item.get('license'):
+        parts.append(f"License: {item['license']}")
+    if item.get('note'):
+        parts.append(f"Note: {item['note']}")
+    if item.get('source_url'):
+        parts.append(f"URL: {item['source_url']}")
+    return "\n".join(parts)[:JEV_STATE_MAX_CHARS]
+
+
+def _select_for_scoring(ordered: list, limit: int) -> list:
+    """从已排序的候选里挑打分名单:先保证每个来源至少 JEV_PER_SOURCE_MIN 个名额,
+    再按全局排序补满到 limit,避免排在后面的来源整批拿不到分。"""
+    if len(ordered) <= limit:
+        return list(ordered)
+    chosen, chosen_ids = [], set()
+    by_source = {}
+    for it in ordered:
+        by_source.setdefault(it.get('source', ''), []).append(it)
+    for _src, items in by_source.items():
+        for it in items[:JEV_PER_SOURCE_MIN]:
+            if len(chosen) >= limit:
+                break
+            chosen.append(it)
+            chosen_ids.add(id(it))
+    for it in ordered:
+        if len(chosen) >= limit:
+            break
+        if id(it) not in chosen_ids:
+            chosen.append(it)
+            chosen_ids.add(id(it))
+    return chosen
+
+
+def _jev_cache_fresh(entry, now: datetime) -> bool:
+    """seen 条目里的 Jev 缓存是否在有效期内。"""
+    if not entry or not entry.get('jev') or not entry.get('jev_scored_at'):
+        return False
+    try:
+        scored_at = datetime.fromisoformat(entry['jev_scored_at'])
+    except Exception:
+        return False
+    return (now - scored_at) < timedelta(days=JEV_CACHE_TTL_DAYS)
+
+
+def _score_one_with_jev(item: dict, seen, now: datetime, stats: dict):
+    """给单个候选项打分(或复用缓存),结果写入 item['jev'] / item['jev_status']。
+    异常在本函数内吞掉并计入 stats['failed'],不影响其他词。"""
+    term = item.get('term', '')
+    key = item.get('_seen_key')
+    entry = seen.get(key) if (seen is not None and key) else None
+    reason = item.get('_notify_reason') or ''
+
+    # 2.4 缓存复用:7 天内、且本轮没有新证据(should_notify 给的是 cooldown/repeat)
+    if _jev_cache_fresh(entry, now) and (reason == 'cooldown' or reason.startswith('repeat')):
+        item['jev'] = entry['jev']
+        item['jev_status'] = 'cached'
+        stats['cached'] += 1
+        print(f"[Jev] {term}: 复用缓存打分 (scored_at={entry.get('jev_scored_at')}, model={entry.get('jev_model')})")
+        return
+
+    stats['attempted'] += 1
+    jev, model_used = score_with_jev_state(build_jev_state(item))
+    if jev:
+        item['jev'] = jev
+        item['jev_status'] = 'scored'
+        stats['succeeded'] += 1
+        if entry is not None:
+            entry['jev'] = jev
+            entry['jev_scored_at'] = now.isoformat()
+            entry['jev_model'] = model_used
+        news = jev.get('newsworthiness')
+        news_s = f"{news:.2f}" if isinstance(news, (int, float)) else "n/a"
+        print(f"[Jev] {term}: intent={jev.get('intent')} news={news_s} via {model_used}")
+    else:
+        item['jev_status'] = 'unscored'
+        stats['failed'] += 1
+        print(f"[Jev] {term}: 本条未打分(通道失败),放行并标记 unscored")
+    time.sleep(1)  # 免费池限流, 礼貌间隔
+
+
+def enrich_with_jev(candidates: list, seen: dict = None, now: datetime = None) -> dict:
+    """给候选词批量加 Jev 打分,返回本轮 jev_stats。
+    先按现有规则(get_sort_key)排序再按来源分配名额;每个词单独容错。
+    所有候选都会被标 jev_status: scored / cached / unscored。"""
+    stats = {'provider': JEV_PROVIDER, 'attempted': 0, 'succeeded': 0, 'failed': 0, 'cached': 0}
+    if now is None:
+        now = datetime.now(timezone.utc)
+    for item in candidates:
+        item['jev_status'] = 'unscored'
+    if JEV_PROVIDER == 'none' or not candidates:
+        return stats
+    ordered = sorted(candidates, key=get_sort_key)
+    for item in _select_for_scoring(ordered, JEV_MAX_SCORE_PER_RUN):
+        if not item.get('term'):
             continue
-        jev = score_with_jev(term)
-        if jev:
-            item["jev"] = jev
-            print(f"[Jev] {term}: intent={jev['intent']} news={jev['newsworthiness']:.2f}")
-        time.sleep(1)  # 免费池限流, 礼貌间隔
-    return candidates
+        try:
+            _score_one_with_jev(item, seen, now, stats)
+        except Exception as e:
+            stats['failed'] += 1
+            item['jev_status'] = 'unscored'
+            print(f"[Jev] {item.get('term')}: 打分异常 {e},跳过本条")
+    return stats
+
+
+def update_jev_health(stats: dict, run_at_iso: str, output_dir: str, dry_run: bool = False):
+    """维护最近 5 轮 Jev 打分统计(outputs/jev_health.json,dry-run 不落盘)。
+    连续 2 轮 attempted>0 且 succeeded=0 时返回告警文案,否则返回 None。"""
+    path = os.path.join(output_dir, 'jev_health.json')
+    history = []
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                history = data.get('history') or []
+        except Exception:
+            history = []
+    current = {'run_at': run_at_iso}
+    for k in ('provider', 'attempted', 'succeeded', 'failed', 'cached'):
+        current[k] = stats.get(k)
+    recent = (history + [current])[-5:]
+    if not dry_run:
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({'history': recent}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[Jev健康] 写入 {path} 失败: {e}")
+    last_two = recent[-2:]
+    if len(last_two) == 2 and all(
+        (h.get('attempted') or 0) > 0 and (h.get('succeeded') or 0) == 0 for h in last_two
+    ):
+        return "⚠️ [Jev健康] Jev 打分失效，当前过滤为全部放行（连续 2 轮 succeeded=0）"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1149,6 +1364,7 @@ def fetch_github_breakout():
             "event_type": event_type,
             "note": f"GitHub breakout：{full_name} 建仓{q['age_days']:.0f}天获{q['stars']}星（日均{q['stars_per_day']:.0f}）",
             "source_url": f"https://github.com/{full_name}" if full_name else "",
+            "description": (q['repo'].get('description') or '').strip(),
         })
 
     def emit_suite(org, members):
@@ -1177,6 +1393,7 @@ def fetch_github_breakout():
             "event_type": event_type,
             "note": f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}",
             "source_url": f"https://github.com/{org}",
+            "description": context,
         })
         print(f"[GitHub] {org} 套件去重：{len(members_sorted)}个仓库合并为1个套件候选")
 
@@ -1797,12 +2014,13 @@ def main(dry_run: bool = False):
         output_candidates.append(item)
 
     # Jev 打分层: 给 top 候选词加结构化评分(失败不阻塞)
+    jev_stats = {'provider': JEV_PROVIDER, 'attempted': 0, 'succeeded': 0, 'failed': 0, 'cached': 0}
     try:
-        enrich_with_jev(output_candidates)
+        jev_stats = enrich_with_jev(output_candidates, seen=seen, now=now_bj)
     except Exception as e:
         print(f"[Jev] 批量打分发生未知异常: {e}")
 
-    # Jev 产品技术度过滤: 有有效评分且 is_product_tech < 0.6 的直接丢弃
+    # Jev 产品技术度过滤: 有有效评分且 is_product_tech < JEV_PRODUCT_TECH_THRESHOLD 的直接丢弃
     # (yuliuswiki 只做产品技术类词；无评分的不拦截，避免 Jev 失败时误杀)
     # 被丢弃的词收集到 filtered_items,输出写成功后写 last_filtered_*(不算推送)
     kept = []
@@ -1810,9 +2028,9 @@ def main(dry_run: bool = False):
     for c in output_candidates:
         j = c.get('jev') or {}
         pt = j.get('is_product_tech')
-        if isinstance(pt, (int, float)) and pt < 0.6:
+        if isinstance(pt, (int, float)) and pt < JEV_PRODUCT_TECH_THRESHOLD:
             print(f"[Jev过滤] 丢弃: {c.get('term')} (is_product_tech={pt:.2f})")
-            filtered_items.append((c, f"jev_product_tech={pt:.2f} < 0.6"))
+            filtered_items.append((c, f"jev_product_tech={pt:.2f} < {JEV_PRODUCT_TECH_THRESHOLD}"))
             continue
         kept.append(c)
     print(f"[Jev过滤] {len(output_candidates)} -> {len(kept)}")
@@ -1850,6 +2068,13 @@ def main(dry_run: bool = False):
             check_hit_rate(tracking_path=tracking_path, output_dir=output_dir)
         except Exception as e:
             print(f"[命中率核验] 执行发生未知异常: {e}")
+
+    # Jev 健康监控:打印本轮打分统计,连续 2 轮打分全失败时明确告警
+    print(f"[Jev统计] provider={jev_stats.get('provider')} attempted={jev_stats.get('attempted')} "
+          f"succeeded={jev_stats.get('succeeded')} failed={jev_stats.get('failed')} cached={jev_stats.get('cached')}")
+    jev_warning = update_jev_health(jev_stats, now_bj_iso, output_dir, dry_run=dry_run)
+    if jev_warning:
+        print(jev_warning)
 
     print(f"\n=== 监控完成 ===")
     print(f"有效候选新词总数: {len(output_candidates)}")
