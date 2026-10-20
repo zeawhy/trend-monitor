@@ -832,24 +832,24 @@ def _parse_jev_answers(data) -> dict | None:
 
 
 def _jev_post(endpoint: str, model: str, api_key: str, state: str, timeout: float, label: str) -> dict | None:
-    """向 Jev 接口发一次请求并解析;失败返回 None。密钥只进请求头,不打印。"""
-    import urllib.request
+    """向 Jev 接口发一次请求并解析;失败返回 None。密钥只进请求头,不打印。
 
+    传输层优先用 requests:urllib 经本机出口代理读 OpenRouter 的响应时
+    会 IncompleteRead(响应被截断),requests 无此问题(2026-10-20 实测)。
+    requests 不可用时才回落 urllib。
+    """
     payload = {"model": model, "state": state, "questions": _jev_questions()}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "curl/8.0",
+    }
     try:
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": "curl/8.0",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return _parse_jev_answers(data)
+        resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            print(f"[Jev] {label} 打分失败: HTTP {resp.status_code}")
+            return None
+        return _parse_jev_answers(resp.json())
     except Exception as e:
         print(f"[Jev] {label} 打分失败: {e}")
         return None

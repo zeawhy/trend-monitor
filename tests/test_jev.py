@@ -91,9 +91,9 @@ class TestProviderChain(unittest.TestCase):
             self.assertEqual(tw.score_with_jev_state("x"), sentinel)
 
     def test_timeout_returns_none_gracefully(self):
-        import urllib.request
+        import requests as _rq
         with mock.patch.object(tw, "JEV_PROVIDER", "opencode_free"), \
-             mock.patch.object(urllib.request, "urlopen", side_effect=TimeoutError("timed out")):
+             mock.patch.object(tw.requests, "post", side_effect=_rq.Timeout("timed out")):
             self.assertEqual(tw.score_with_jev_state("x"), (None, None))
 
 
