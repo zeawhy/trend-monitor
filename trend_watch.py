@@ -417,12 +417,85 @@ EXTRA_GOSSIP_PATTERNS = re.compile(
     re.I
 )
 
+KNOWN_PRODUCTS = {
+    "deepseek-v4.1-flash",
+    "deepseek-v4",
+    "deepseek-v3",
+    "deepseek-r1",
+    "deepseek-coder",
+    "flux.1",
+    "flux-1",
+    "flux-3",
+    "sdxl",
+    "stable-diffusion",
+    "sd-3.5",
+    "llama-3",
+    "llama-3.1",
+    "llama-3.2",
+    "mistral-7b",
+    "mixtral",
+    "qwen-2.5",
+    "qwen-2",
+    "qwen2.5-coder",
+    "wan2.1",
+    "wan2.5",
+    "cogvideox",
+}
+
+REPOST_ACCOUNTS = {
+    "comfy-org",
+    "city96",
+    "bartowski",
+    "kijai",
+    "quantfactory",
+    "thebloke",
+}
+
+VERSION_UPDATE_SEEN_DAYS = 7  # first_seen_at 超过 7 天视作老产品版本更新
+
+
+def is_known_or_old_product(name: str, seen: dict = None, now: datetime = None) -> bool:
+    """判断标准化后的模型名是否已在已知产品名单中，或在 seen_terms 中首次发现时间超过 7 天。"""
+    if not name:
+        return False
+    clean = name.strip().lower()
+    clean_slug = re.sub(r'[\s_]+', '-', clean)
+    clean_space = re.sub(r'[\-_]+', ' ', clean)
+
+    for cand in (clean, clean_slug, clean_space):
+        if cand in KNOWN_PRODUCTS:
+            return True
+
+    if not seen:
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    for k, entry in seen.items():
+        if k.startswith('_') or not isinstance(entry, dict):
+            continue
+        k_norm = normalize_model_name(k).lower()
+        k_slug = re.sub(r'[\s_]+', '-', k_norm)
+        k_space = re.sub(r'[\-_]+', ' ', k_norm)
+        if any(c in (k_norm, k_slug, k_space) for c in (clean, clean_slug, clean_space)):
+            first_seen = entry.get('first_seen_at') or entry.get('first_seen')
+            if first_seen:
+                try:
+                    fs_dt = datetime.fromisoformat(first_seen.replace('Z', '+00:00'))
+                    if (now - fs_dt).total_seconds() > VERSION_UPDATE_SEEN_DAYS * 86400:
+                        return True
+                except Exception:
+                    pass
+    return False
+
+
 EVENT_TYPE_PRIORITY = {
     'new_model': -1,
     'product_launch': 0,
-    'policy': 1,
-    'gossip': 2,
-    None: 3
+    'version_update': 1,
+    'policy': 2,
+    'gossip': 3,
+    None: 4
 }
 
 
@@ -500,12 +573,15 @@ def parse_heat(heat) -> int:
 
 
 def get_sort_key(item: dict) -> tuple:
-    """排序键：按 (event_type 优先级升序, commercial_score 降序, heat 降序)"""
+    """排序键：按 (heat 为空标志, event_type 优先级升序, commercial_score 降序, heat 降序)
+    拿不到真实热度时 heat 为 null，排序时 null 排在同一路线的最后，不参与和其他来源的比较。
+    """
+    has_no_heat = 1 if item.get('heat') is None else 0
     ev_type = item.get('event_type')
-    prio = EVENT_TYPE_PRIORITY.get(ev_type, 3)
+    prio = EVENT_TYPE_PRIORITY.get(ev_type, 4)
     c_score = item.get('commercial_score', 0)
     h_val = parse_heat(item.get('heat', 0))
-    return (prio, -c_score, -h_val)
+    return (has_no_heat, prio, -c_score, -h_val)
 
 
 # ===================== seen_terms 状态管理 (v2) =====================
@@ -598,8 +674,100 @@ def migrate_seen_entry(entry) -> dict:
     return migrated
 
 
+GITHUB_ORG_SUITE_DAYS = 30         # 组织跨轮套件统计窗口（天）
+GITHUB_ORG_SUITE_THRESHOLD = 3    # 组织近 30 天已推送仓库合并阈值
+
+
+def get_org_recent_pushed_repos(seen: dict, org: str, days: int = GITHUB_ORG_SUITE_DAYS, now: datetime = None) -> list:
+    """获取指定 GitHub org 在近 days 天内已经推送过的仓库列表。
+    优先读取 seen['_github_org_pushed'][org]，同时兼容扫描历史 seen_terms 记录。"""
+    if not seen:
+        return []
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+
+    org_lower = org.strip().lower()
+    pushed = []
+    seen_repos = set()
+
+    # 1. 读取维护的 _github_org_pushed 记录
+    org_stats = seen.get('_github_org_pushed') or {}
+    if isinstance(org_stats, dict):
+        for rec in org_stats.get(org_lower, []):
+            repo = rec.get('repo')
+            ts = rec.get('pushed_at')
+            if repo and ts and repo not in seen_repos:
+                try:
+                    p_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    if p_dt >= cutoff:
+                        pushed.append(rec)
+                        seen_repos.add(repo)
+                except Exception:
+                    pass
+
+    # 2. 兼容扫描历史 seen_terms 中的条目
+    for k, entry in seen.items():
+        if k.startswith('_') or not isinstance(entry, dict):
+            continue
+        last_notified = entry.get('last_notified_at')
+        if not last_notified:
+            continue
+        url = entry.get('project_url') or ''
+        if 'github.com/' in url:
+            parts = url.split('github.com/')[-1].strip('/').split('/')
+            if len(parts) >= 2 and parts[0].lower() == org_lower:
+                repo_name = f"{parts[0]}/{parts[1]}"
+                if repo_name not in seen_repos:
+                    try:
+                        p_dt = datetime.fromisoformat(last_notified.replace('Z', '+00:00'))
+                        if p_dt >= cutoff:
+                            rec = {'repo': repo_name, 'pushed_at': last_notified}
+                            pushed.append(rec)
+                            seen_repos.add(repo_name)
+                    except Exception:
+                        pass
+
+    # 3. 兼容扫描历史 outputs/github_breakout_state.json（历史 breakout 记录）
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    gh_state_path = os.path.join(base_dir, 'outputs', 'github_breakout_state.json')
+    if os.path.exists(gh_state_path):
+        try:
+            with open(gh_state_path, 'r', encoding='utf-8') as f:
+                gh_state = json.load(f)
+            if isinstance(gh_state, dict):
+                for full_name, s_info in gh_state.items():
+                    if full_name not in seen_repos and '/' in full_name:
+                        parts = full_name.split('/')
+                        if parts[0].lower() == org_lower:
+                            ts = s_info.get('ts') if isinstance(s_info, dict) else None
+                            if ts:
+                                try:
+                                    p_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                                    if p_dt >= cutoff:
+                                        pushed.append({'repo': full_name, 'pushed_at': ts})
+                                        seen_repos.add(full_name)
+                                except Exception:
+                                    pass
+        except Exception:
+            pass
+
+    return pushed
+
+
+def record_org_pushed_repo(seen: dict, org: str, repo: str, pushed_at_iso: str):
+    """记录某组织推送了新仓库到 seen['_github_org_pushed']"""
+    if not seen or not org or not repo:
+        return
+    org_lower = org.strip().lower()
+    org_stats = seen.setdefault('_github_org_pushed', {})
+    records = org_stats.setdefault(org_lower, [])
+    if not any(r.get('repo') == repo for r in records):
+        records.append({'repo': repo, 'pushed_at': pushed_at_iso})
+
+
 def seen_needs_migration(data: dict) -> bool:
-    return any(isinstance(v, dict) and 'first_seen_at' not in v for v in data.values())
+    return any(not k.startswith('_') and isinstance(v, dict) and 'first_seen_at' not in v for k, v in data.items())
 
 
 def backup_seen_terms(path: str):
@@ -620,8 +788,8 @@ def load_seen_terms(path: str) -> dict:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    for v in data.values():
-                        if isinstance(v, dict):
+                    for k, v in data.items():
+                        if not k.startswith('_') and isinstance(v, dict):
                             _invalidate_legacy_jev(v)
                     return data
         except Exception as e:
@@ -638,7 +806,9 @@ def save_seen_terms(path: str, data: dict):
 
 def resolve_seen_key(term: str, project_url: str, seen: dict) -> str:
     """同名词条的 key:同一产品按 project_url 对齐;同名但项目地址不同的产品
-    拆成 base、base#2、base#3…,不再只靠小写词粗暴合并。"""
+    拆成 base、base#2、base#3…,不再只靠小写词粗暴合并。
+    对模型族名,若历史上以某个端点名/变体名记录过(如 'flux 3 max text to video'),
+    自动继承历史记录,避免新变体造成重复推送。"""
     base = term.strip().lower()
     if not project_url:
         return base
@@ -647,10 +817,23 @@ def resolve_seen_key(term: str, project_url: str, seen: dict) -> str:
         key = base if n == 1 else f"{base}#{n}"
         entry = seen.get(key)
         if entry is None:
-            return key
+            break
         if (entry.get('project_url') or '') == project_url:
             return key
         n += 1
+
+    # 检查 seen_terms 是否已有同模型族的端点历史记录（向前兼容历史数据）
+    for old_k, old_entry in seen.items():
+        if not isinstance(old_entry, dict) or old_k.startswith('_'):
+            continue
+        old_url = old_entry.get('project_url') or ''
+        if (old_url and project_url and (old_url.startswith(project_url) or project_url.startswith(old_url))) or \
+           old_k.startswith(base + ' '):
+            seen[base] = dict(old_entry)
+            seen[base]['project_url'] = project_url
+            return base
+
+    return base if n == 1 else f"{base}#{n}"
 
 
 def extract_version(text: str):
@@ -705,6 +888,17 @@ def mark_run_results(final_items: list, filtered_items: list, seen: dict, now_is
             continue
         entry['last_notified_at'] = now_iso
         entry['last_notified_reason'] = item.get('_notify_reason')
+        # 记录 GitHub 仓库推送历史用于跨轮组织级套件统计
+        if item.get('source') == 'github_breakout':
+            if item.get('members'):
+                for repo in item.get('members'):
+                    record_org_pushed_repo(seen, item.get('org') or repo.split('/')[0], repo, now_iso)
+            else:
+                url = item.get('source_url', '')
+                if 'github.com/' in url:
+                    parts = url.split('github.com/')[-1].strip('/').split('/')
+                    if len(parts) >= 2:
+                        record_org_pushed_repo(seen, parts[0], f"{parts[0]}/{parts[1]}", now_iso)
     for item, reason in filtered_items:
         entry = seen.get(item.get('_seen_key') or '')
         if entry is None:
@@ -1148,8 +1342,17 @@ MONETIZATION_GENERIC_NEWS_MAX = 0.4  # jev.intent=generic 且 newsworthiness 低
 def classify_monetization(item: dict) -> tuple:
     """给候选词定变现路线,返回 (monetization_path, path_reason),规则按顺序判断。"""
     jev = item.get('jev') or {}
+    # 0. 老产品版本更新 / 量化 / 衍生格式 → 默认先观察 (watch)
+    if item.get('event_type') == 'version_update':
+        return 'watch', '老产品版本更新/量化/衍生格式，默认先观察'
     # 1. 媒体生成新模型且 API 可用 → 抢 48 小时窗口
-    if item.get('event_type') == 'new_model' and item.get('api_available'):
+    is_media = (
+        item.get('source') == 'api_platform'
+        or jev.get('intent') == 'media_generation'
+        or item.get('pipeline_tag') in HF_MEDIA_PIPELINE_TAGS
+        or _is_media_category(item.get('pipeline_tag') or '')
+    )
+    if (item.get('event_type') == 'new_model' or is_media) and item.get('api_available'):
         return 'quick_paid_site', '抢 48 小时窗口：积分制付费站（媒体生成新模型且 API 可用）'
     # 2. 工具/付费意图 → yuliusbox 工具页
     if item.get('intent') == 'tool' or jev.get('intent') in ('paid_tool', 'media_generation'):
@@ -1323,12 +1526,14 @@ def _hf_model_license(m):
     return None
 
 
-def fetch_huggingface_trending():
+def fetch_huggingface_trending(seen: dict = None):
     """抓取 Hugging Face 新模型信号:只用 trendingScore 排序拉候选,只保留
     created_at 在 7 天内的模型(不用 last_modified,避免老模型更新混入);
     一个模型输出一条结果,term = 模型名(去组织前缀、保留版本号与连字符,
     如 Wan2.5-T2V),不再把模型名/标签拆成 2-4 词泛短语。
     媒体生成类 pipeline + API 可用 + 许可证未明确禁止商用 → event_type=new_model。
+    老产品版本更新/量化/衍生格式（在已知名单或已见超过7天）→ event_type=version_update。
+    转载/适配账号（如 Comfy-Org）尝试从模型卡解析 base_model 去重。
     """
     results = []
     print("[HuggingFace] 开始抓取 trendingScore 新模型...")
@@ -1366,10 +1571,27 @@ def fetch_huggingface_trending():
     recent = [m for m in models if getattr(m, 'created_at', None) and m.created_at >= cutoff]
     print(f"[HuggingFace] trendingScore 候选 {len(models)} 个,其中 created_at 在 {HF_RECENT_DAYS} 天内的 {len(recent)} 个")
 
+    families = {}
     for m in recent:
-        model_name = (m.id or '').split('/')[-1]
+        model_id = m.id or ''
+        model_name = model_id.split('/')[-1]
         if not model_name:
             continue
+        org = model_id.split('/')[0] if '/' in model_id else ''
+
+        # Comfy-Org 等转载、适配账号发的模型：先尝试从模型卡找原始模型 (base_model 字段) 用原始模型名字去重
+        if org.lower() in REPOST_ACCOUNTS:
+            card_data = getattr(m, 'card_data', None) or getattr(m, 'cardData', None)
+            if hasattr(card_data, 'to_dict'):
+                card_data = card_data.to_dict()
+            if isinstance(card_data, dict):
+                bm = card_data.get('base_model')
+                if isinstance(bm, list) and bm:
+                    bm = bm[0]
+                if bm and isinstance(bm, str):
+                    print(f"[HuggingFace] 转载账号 {org}/{model_name} 解析到 base_model: {bm}")
+                    model_name = bm.split('/')[-1]
+
         pipeline_tag = getattr(m, 'pipeline_tag', None)
         license_str = _hf_model_license(m)
 
@@ -1383,36 +1605,95 @@ def fetch_huggingface_trending():
             api_available = None
 
         heat = max(m.likes or 0, (m.downloads or 0) // 100, 1)
-        context = f"huggingface model {m.id} pipeline:{pipeline_tag or ''} license:{license_str or ''}"
 
-        valid, reason = check_candidate(model_name, context)
-        if not valid:
-            print(f"[HuggingFace] 过滤掉{reason}: {model_name}")
-            continue
+        # 变体归组：同一组织下名字只差后缀（-dev / -comfy / -gguf / -fp8 等）的模型合并
+        family_name = normalize_model_name(model_name) or model_name
+        group_key = (org.lower(), family_name.lower())
 
-        intent = classify_intent(model_name, context)
-        commercial_score = score_commercial(model_name, context, intent=intent)
-        event_type = classify_event_type(model_name, context)
-        if (
+        created_at_val = getattr(m, 'created_at', None)
+        if isinstance(created_at_val, datetime):
+            created_at_val = created_at_val.isoformat()
+
+        variant_item = {
+            "model_id": model_id,
+            "name": model_name,
+            "category": pipeline_tag,
+            "url": f"https://huggingface.co/{model_id}",
+            "license": license_str,
+            "api_available": api_available,
+            "heat": heat,
+            "created_at": created_at_val,
+        }
+
+        if group_key not in families:
+            context = f"huggingface model {model_id} pipeline:{pipeline_tag or ''} license:{license_str or ''}"
+            valid, reason = check_candidate(family_name, context)
+            if not valid:
+                print(f"[HuggingFace] 过滤掉{reason}: {family_name}")
+                continue
+
+            families[group_key] = {
+                "org": org,
+                "family_name": family_name,
+                "primary_model_id": model_id,
+                "source_url": f"https://huggingface.co/{model_id}",
+                "pipeline_tag": pipeline_tag,
+                "license": license_str,
+                "api_available": api_available,
+                "heat": heat,
+                "variants": [variant_item],
+                "context": context,
+            }
+        else:
+            fam = families[group_key]
+            fam["variants"].append(variant_item)
+            if fam["api_available"] is not True and api_available is True:
+                fam["api_available"] = True
+            elif fam["api_available"] is None and api_available is not None:
+                fam["api_available"] = api_available
+            if heat > fam["heat"]:
+                fam["heat"] = heat
+
+    for group_key, fam in families.items():
+        family_name = fam["family_name"]
+        context = fam["context"]
+        intent = classify_intent(family_name, context)
+        commercial_score = score_commercial(family_name, context, intent=intent)
+
+        # 检查是否为已知产品或在历史 seen_terms 中 >7 天的老产品
+        is_version_update = is_known_or_old_product(family_name, seen=seen, now=datetime.now(timezone.utc))
+
+        api_available = fam["api_available"]
+        pipeline_tag = fam["pipeline_tag"]
+        license_str = fam["license"]
+
+        if is_version_update:
+            event_type = 'version_update'
+        elif (
             pipeline_tag in HF_MEDIA_PIPELINE_TAGS
             and api_available
             and not _license_blocks_commercial(license_str)
         ):
             event_type = 'new_model'
+        else:
+            event_type = classify_event_type(family_name, context)
 
+        var_count = len(fam["variants"])
+        note_var = f"(含 {var_count} 个变体)" if var_count > 1 else ""
         results.append({
-            "term": model_name,
+            "term": family_name,
             "source": "huggingface",
-            "heat": heat,
+            "heat": fam["heat"],
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"HuggingFace 近{HF_RECENT_DAYS}天新模型 {m.id}(pipeline_tag={pipeline_tag}, license={license_str}, api_available={api_available})",
-            "source_url": f"https://huggingface.co/{m.id}",
-            "hf_model_id": m.id,
+            "note": f"HuggingFace 近{HF_RECENT_DAYS}天新模型 {fam['primary_model_id']}{note_var}(pipeline_tag={pipeline_tag}, license={license_str}, api_available={api_available})",
+            "source_url": fam["source_url"],
+            "hf_model_id": fam["primary_model_id"],
             "pipeline_tag": pipeline_tag,
             "license": license_str,
             "api_available": api_available,
+            "variants": fam["variants"],
         })
         if len(results) >= HF_MAX_RESULTS:
             break
@@ -1424,10 +1705,11 @@ def fetch_huggingface_trending():
 # ---------------------------------------------------------------------------
 # 数据源 4: GitHub breakout 仓库 (GitHub Search API)
 # ---------------------------------------------------------------------------
-def fetch_github_breakout():
+def fetch_github_breakout(seen: dict = None):
     """抓取 GitHub 新建仓库 breakout 信号：创建不足 14 天、日均涨星 200+ 或总星 400+。
     仓库名本身即产品/技术新词（如 docling、browser-use），用简介做上下文。
     未认证限流 10 req/min，本轮只打 1 次请求。
+    跨轮去重：同一组织近 30 天已推送 ≥3 个仓库时，新仓库不再单独推送，并入该组织的套件条目。
     """
     results = []
     print("[GitHub] 开始抓取 breakout 仓库...")
@@ -1514,7 +1796,7 @@ def fetch_github_breakout():
             "description": (q['repo'].get('description') or '').strip(),
         })
 
-    def emit_suite(org, members):
+    def emit_suite(org, members, is_series_batch=False, prior_count=0):
         members_sorted = sorted(members, key=lambda m: m['stars'], reverse=True)
         total_stars = sum(m['stars'] for m in members_sorted)
         member_list = '、'.join(
@@ -1531,6 +1813,10 @@ def fetch_github_breakout():
         intent = classify_intent(suite_term, context)
         commercial_score = score_commercial(suite_term, context, intent=intent)
         event_type = classify_event_type(suite_term, context)
+        if is_series_batch:
+            note = f"同组织系列，疑似批量发布：{org} 近{GITHUB_ORG_SUITE_DAYS}天已推{prior_count}个仓库，本轮更新{len(members_sorted)}个仓库：{member_list}"
+        else:
+            note = f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}"
         results.append({
             "term": suite_term,
             "source": "github_breakout",
@@ -1538,15 +1824,19 @@ def fetch_github_breakout():
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}",
+            "note": note,
             "source_url": f"https://github.com/{org}",
             "description": context,
+            "members": [m['repo'].get('full_name', '') for m in members_sorted],
+            "org": org,
         })
-        print(f"[GitHub] {org} 套件去重：{len(members_sorted)}个仓库合并为1个套件候选")
+        print(f"[GitHub] {org} 套件去重：{len(members_sorted)}个仓库合并为1个套件候选 (疑似批量发布={is_series_batch})")
 
     for org, members in sorted(by_org.items(), key=lambda kv: -sum(m['stars'] for m in kv[1])):
-        if len(members) >= 3:
-            emit_suite(org, members)
+        prior_pushed = get_org_recent_pushed_repos(seen, org, days=GITHUB_ORG_SUITE_DAYS, now=now) if seen else []
+        is_cross_run_series = len(prior_pushed) >= GITHUB_ORG_SUITE_THRESHOLD
+        if len(members) >= GITHUB_ORG_SUITE_THRESHOLD or is_cross_run_series:
+            emit_suite(org, members, is_series_batch=is_cross_run_series, prior_count=len(prior_pushed))
         else:
             for m in members:
                 emit_single(m)
@@ -1789,6 +2079,66 @@ API_PLATFORM_MEDIA_CATEGORIES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 模型名变体与后缀处理 (Variant & Normalization)
+# ---------------------------------------------------------------------------
+_DATE_SUFFIX_RE = re.compile(
+    r'[\-_](?:(?:19|20)\d{2})?(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?=$|[\-_])',
+    re.I
+)
+_VARIANT_SUFFIX_RE = re.compile(
+    r'[\-_](?:dev|schnell|comfy|comfyui|gguf|fp8|fp16|bf16|awq|gptq|int4|int8|int2|bnb(?:[48]bit)?|exl2|safetensors|onnx|lora|diffusers|vae|base|instruct|chat|preview)(?=$|[\-_])',
+    re.I
+)
+
+
+def normalize_model_name(name_or_id: str) -> str:
+    """对模型名做标准化：去掉组织前缀、日期后缀（-MMDD/-YYYYMMDD）、量化与格式后缀（-gguf/-fp8/-awq/-comfy 等）。"""
+    if not name_or_id:
+        return ""
+    name = name_or_id.split("/")[-1].strip()
+    prev = None
+    while prev != name:
+        prev = name
+        name = _DATE_SUFFIX_RE.sub('', name)
+        name = _VARIANT_SUFFIX_RE.sub('', name)
+        name = name.rstrip("-_ ")
+    return name
+
+
+def _extract_fal_family(endpoint_id: str, display_name: str) -> tuple[str, str]:
+    """从 fal.ai 的 endpoint_id 与 display_name 中提取 (family_path, family_name)。
+    例如:
+      endpoint_id: 'blackforestlabs/flux-3-max/text-to-video'
+      display_name: 'FLUX 3 Max Text to Video'
+      -> family_path: 'blackforestlabs/flux-3-max', family_name: 'FLUX 3 Max'
+
+      endpoint_id: 'bria/fibo-2/generate'
+      display_name: 'Fibo 2.0 Generate'
+      -> family_path: 'bria/fibo-2', family_name: 'Fibo 2.0'
+    """
+    parts = endpoint_id.strip("/").split("/")
+    if len(parts) >= 3:
+        family_path = "/".join(parts[:-1])
+        endpoint_name = parts[-1]
+    else:
+        family_path = endpoint_id.strip("/")
+        endpoint_name = parts[-1] if parts else ""
+
+    family_name = display_name
+    if endpoint_name:
+        ep_words = endpoint_name.replace("-", " ").replace("_", " ")
+        pattern = r'[\s\-_:]*(?:' + re.escape(ep_words) + r'|' + re.escape(endpoint_name) + r')[\s\-_:]*$'
+        cleaned = re.sub(pattern, '', display_name, flags=re.IGNORECASE).strip()
+        if cleaned:
+            family_name = cleaned
+        elif len(parts) >= 2:
+            family_slug = parts[-2] if len(parts) >= 3 else parts[-1]
+            family_name = family_slug.replace("-", " ").title()
+
+    return family_path, family_name
+
+
 def _is_media_category(cat: str) -> bool:
     if not cat:
         return False
@@ -1799,7 +2149,11 @@ def _is_media_category(cat: str) -> bool:
 
 
 def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
-    """抓取 fal.ai 最近上架的媒体模型。密钥只读环境变量 FAL_KEY，绝不写死；无密钥支持公开接口。"""
+    """抓取 fal.ai 最近上架的媒体模型并按模型族归组合并。
+    - 归组：按平台模型族路径 (如 blackforestlabs/flux-3-max)，去掉最后一级端点名
+    - 每组输出一条：term 用模型族名 (如 'FLUX 3 Max')，新增 variants 列出各端点/类别/链接
+    - source_url 用模型族主页
+    """
     results = []
     fal_key = os.environ.get("FAL_KEY")
     url = "https://api.fal.ai/v1/models?sort=recent"
@@ -1818,6 +2172,7 @@ def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
         print(f"[fal.ai] 请求异常(静默跳过): {e}")
         return results
 
+    families = {}
     for m in models:
         meta = m.get("metadata") or {}
         cat = meta.get("category") or ""
@@ -1841,23 +2196,64 @@ def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
 
         model_url = f"https://fal.ai/models/{endpoint_id}"
         desc = meta.get("description") or ""
-
         unit_price = meta.get("unit_price") or meta.get("price")
-        price_note = f"单价: {unit_price}" if unit_price else "单价: 见模型页"
 
+        family_path, family_name = _extract_fal_family(endpoint_id, display_name)
+        variant_item = {
+            "endpoint": endpoint_id,
+            "category": cat,
+            "url": model_url,
+            "unit_price": unit_price,
+            "date": date_str,
+        }
+
+        if family_path not in families:
+            family_url = f"https://fal.ai/models/{family_path}"
+            families[family_path] = {
+                "family_path": family_path,
+                "family_name": family_name,
+                "family_url": family_url,
+                "categories": [cat],
+                "description": desc,
+                "variants": [variant_item],
+                "latest_date": m_date,
+                "published_at": date_str,
+                "unit_prices": [unit_price] if unit_price else [],
+            }
+        else:
+            fam = families[family_path]
+            fam["variants"].append(variant_item)
+            if cat not in fam["categories"]:
+                fam["categories"].append(cat)
+            if m_date > fam["latest_date"]:
+                fam["latest_date"] = m_date
+                fam["published_at"] = date_str
+            if unit_price and unit_price not in fam["unit_prices"]:
+                fam["unit_prices"].append(unit_price)
+            if not fam["description"] and desc:
+                fam["description"] = desc
+
+    for family_path, fam in families.items():
+        price_val = fam["unit_prices"][0] if fam["unit_prices"] else None
+        price_note = f"单价: {price_val}" if price_val else "单价: 见模型页"
+        cats_str = ", ".join(fam["categories"])
         results.append({
-            "term": display_name,
+            "term": fam["family_name"],
             "source": "api_platform",
-            "heat": 80,
+            "heat": None,
+            "heat_source": "none",
             "intent": "tool",
             "commercial_score": 8,
             "event_type": "new_model",
-            "note": f"平台: fal.ai | {price_note} | 类别: {cat} | 模型: {endpoint_id} | 链接: {model_url}",
-            "source_url": model_url,
+            "note": f"平台: fal.ai | {price_note} | 类别: {cats_str} | 模型族: {family_path} | 变体数: {len(fam['variants'])} | 链接: {fam['family_url']}",
+            "source_url": fam["family_url"],
             "api_available": True,
-            "pipeline_tag": cat,
+            "pipeline_tag": fam["categories"][0] if fam["categories"] else "media_generation",
             "platform": "fal.ai",
-            "description": desc,
+            "description": fam["description"],
+            "variants": fam["variants"],
+            "published_at": fam["published_at"],
+            "unit_price": price_val,
         })
         if len(results) >= limit:
             break
@@ -1909,13 +2305,19 @@ def _fetch_replicate_new_models(cutoff: datetime, limit: int = 5) -> list:
                 pass
 
         run_count = m.get("run_count") or 0
-        heat = max(run_count // 100, 10)
+        if run_count > 0:
+            heat = max(run_count // 100, 1)
+            heat_source = "run_count"
+        else:
+            heat = None
+            heat_source = "none"
         display_name = name.replace("-", " ").title()
 
         results.append({
             "term": display_name,
             "source": "api_platform",
             "heat": heat,
+            "heat_source": heat_source,
             "intent": "tool",
             "commercial_score": 8,
             "event_type": "new_model",
@@ -1984,6 +2386,31 @@ def fetch_api_platform_new_models(seen: dict = None, limit: int = API_PLATFORM_M
 # ---------------------------------------------------------------------------
 # 命中率追踪机制 (Hit Rate Tracking)
 # ---------------------------------------------------------------------------
+def is_legacy_tracking_entry(entry: dict) -> bool:
+    """判定是否为追踪表中的历史旧数据：
+    1. Google Trends 已降为纯验证源前写入的 google_trends 条目；
+    2. 旧版短语提取产生的 HF 泛词（如 'image 2.1', '2.1 comfyui', 'qwen image', 'comfyui diffusion' 等）。
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get('legacy') is True:
+        return True
+    source = entry.get('source')
+    if source == 'google_trends':
+        return True
+    if source == 'huggingface':
+        term = (entry.get('term') or '').strip().lower()
+        legacy_hf = {
+            'qwen image', 'image 2.1', 'qwen image 2.1',
+            '2.1 comfyui', 'comfyui diffusion', 'comfyui diffusion single'
+        }
+        if term in legacy_hf:
+            return True
+        if any(p in term for p in ('image 2.1', '2.1 comfyui', 'comfyui diffusion')):
+            return True
+    return False
+
+
 def load_tracking_data(path: str) -> list:
     """加载候选词命中率追踪文件 hidden_files/word_tracking.json"""
     if os.path.exists(path):
@@ -2020,7 +2447,8 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
         term = c.get('term', '').strip()
         source = c.get('source', '')
         key = (term.lower(), source)
-        heat = parse_heat(c.get('heat', 0))
+        raw_heat = c.get('heat')
+        heat = parse_heat(raw_heat) if raw_heat is not None else None
         url = c.get('source_url', '')
         if key not in existing:
             item = {
@@ -2044,7 +2472,7 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
             if not item.get("heat_history"):
                 item["heat_history"] = [{
                     "date": (item.get("discovered_at") or timestamp_iso)[:10],
-                    "heat": item.get("initial_heat", 0),
+                    "heat": item.get("initial_heat"),
                 }]
             hist = item["heat_history"]
             if not hist or hist[-1].get("date") != day:
@@ -2083,11 +2511,23 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     beijing_tz = timezone(timedelta(hours=8))
     now = datetime.now(timezone.utc).astimezone(beijing_tz)
 
-    if not tracking_data:
-        print(f"[命中率核验] 追踪库 {tracking_path} 为空，输出初始报告")
+    # 标记 legacy 旧数据（如未显式标记过）
+    legacy_updated = False
+    for item in tracking_data:
+        if is_legacy_tracking_entry(item) and item.get('legacy') is not True:
+            item['legacy'] = True
+            legacy_updated = True
+    if legacy_updated:
+        save_tracking_data(tracking_path, tracking_data)
+
+    # 命中率统计默认排除 legacy 旧条目（已淘汰的 Google Trends 及 HF 泛词）
+    active_data = [item for item in tracking_data if not item.get('legacy')]
+
+    if not active_data:
+        print(f"[命中率核验] 活跃追踪词库为空，输出初始报告")
         report = {
             "generated_at": now.isoformat(),
-            "summary": "追踪词库为空，暂无数据",
+            "summary": "活跃追踪词库为空，暂无数据",
             "overall": {
                 "total_tracked": 0,
                 "total_evaluated": 0,
@@ -2103,7 +2543,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
 
     # 筛选出达到 14 天周期的待核验词
     eval_candidates = []
-    for item in tracking_data:
+    for item in active_data:
         disc_str = item.get('discovered_at', '')
         try:
             disc_dt = datetime.fromisoformat(disc_str)
@@ -2113,7 +2553,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
         except Exception:
             continue
 
-    print(f"[命中率核验] 当前总追踪词数: {len(tracking_data)}，达到 14 天周期的词数: {len(eval_candidates)}")
+    print(f"[命中率核验] 当前总追踪词数: {len(active_data)}（已排除 legacy 旧条目 {len(tracking_data) - len(active_data)} 个），达到 14 天周期的词数: {len(eval_candidates)}")
 
     pt = TrendReq(hl='en-US', tz=360)
 
@@ -2170,12 +2610,12 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     if updated:
         save_tracking_data(tracking_path, tracking_data)
 
-    # 统计各信号源命中率
+    # 统计各信号源命中率（默认排除 legacy 旧条目）
     source_stats = {}
     total_evaluated = 0
     total_hits = 0
 
-    for item in tracking_data:
+    for item in active_data:
         if not item.get('checked'):
             continue
         src = item.get('source', 'unknown')
@@ -2193,7 +2633,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     # 按变现路线统计:content / tool_page 沿用 Trends 标准;quick_paid_site
     # 不用 Trends 判定,标注以 page_tracking 第 7 天净收入为准;旧记录无路线记 legacy
     path_stats = {}
-    for item in tracking_data:
+    for item in active_data:
         p = item.get('monetization_path') or 'legacy'
         if p not in path_stats:
             path_stats[p] = {'total': 0, 'hits': 0, 'tracked': 0}
@@ -2215,7 +2655,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     report = {
         "generated_at": now.isoformat(),
         "overall": {
-            "total_tracked": len(tracking_data),
+            "total_tracked": len(active_data),
             "total_evaluated": total_evaluated,
             "total_hits": total_hits,
             "hit_rate": overall_rate
@@ -2233,7 +2673,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
                 "hit": it.get('hit'),
                 "check_time": it.get('check_time')
             }
-            for it in tracking_data if it.get('checked')
+            for it in active_data if it.get('checked')
         ]
     }
 
@@ -2344,14 +2784,14 @@ def main(dry_run: bool = False):
 
     # 1. GitHub breakout 仓库 (新增信号源)
     try:
-        gh_results = fetch_github_breakout()
+        gh_results = fetch_github_breakout(seen=seen)
         all_candidates.extend(gh_results)
     except Exception as e:
         print(f"[GitHub] 处理发生未知异常: {e}")
 
     # 2. HuggingFace 趋势模型
     try:
-        hf_results = fetch_huggingface_trending()
+        hf_results = fetch_huggingface_trending(seen=seen)
         all_candidates.extend(hf_results)
     except Exception as e:
         print(f"[HuggingFace] 处理发生未知异常: {e}")
@@ -2454,6 +2894,34 @@ def main(dry_run: bool = False):
             continue
         c['monetization_path'] = path
         c['path_reason'] = path_reason
+
+        # quick_paid_site 路线补充字段：单价、条款、发布时间与距今小时数、竞品检查
+        if path == 'quick_paid_site':
+            term_name = c.get('term', '')
+            c['competitor_search_url'] = f"https://www.google.com/search?q={urllib.parse.quote_plus(term_name + ' free online')}"
+            if not c.get('license_url'):
+                if c.get('platform') == 'fal.ai' or (c.get('source_url') and 'fal.ai' in c['source_url']):
+                    c['license_url'] = 'https://fal.ai/terms'
+                elif c.get('platform') == 'replicate' or (c.get('source_url') and 'replicate.com' in c['source_url']):
+                    c['license_url'] = 'https://replicate.com/terms'
+                elif c.get('source') == 'huggingface':
+                    c['license_url'] = c.get('source_url') or 'https://huggingface.co'
+
+            pub_str = c.get('published_at')
+            if pub_str:
+                try:
+                    pub_dt = datetime.fromisoformat(str(pub_str).replace('Z', '+00:00'))
+                    if pub_dt.tzinfo is None:
+                        pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                    c['hours_since_release'] = round((now_bj - pub_dt).total_seconds() / 3600.0, 1)
+                except Exception:
+                    c['hours_since_release'] = None
+            else:
+                c['hours_since_release'] = None
+
+            if 'unit_price' not in c:
+                c['unit_price'] = None
+
         path_counts[path] = path_counts.get(path, 0) + 1
         routed.append(c)
     output_candidates = routed
@@ -2472,7 +2940,7 @@ def main(dry_run: bool = False):
     ]
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(out_items, f, ensure_ascii=False, indent=2)
+            json.dump(out_items, f, ensure_ascii=False, indent=2, default=str)
     except Exception as e:
         print(f"[输出] 写入 {output_path} 失败: {e},本轮不更新任何状态")
         return
@@ -2515,8 +2983,13 @@ def main(dry_run: bool = False):
     if quick:
         print("\n--- 🚀 quick_paid_site（抢 48 小时窗口：积分制付费站） ---")
         for c in quick:
-            print(f"- {c.get('term')} | 模型类型: {c.get('pipeline_tag')} | "
-                  f"api_available: {c.get('api_available')} | license: {c.get('license')} | {c.get('source_url')}")
+            price_disp = c.get('unit_price') if c.get('unit_price') else "需人工确认 (null)"
+            hrs = c.get('hours_since_release')
+            hrs_disp = f"距今 {hrs}h ({'48h窗口内' if hrs is not None and hrs <= 48 else '超48h'})" if hrs is not None else "发布时间未知"
+            lic = c.get('license_url') or c.get('license') or "无"
+            comp = c.get('competitor_search_url') or ""
+            print(f"- {c.get('term')} | 单价: {price_disp} | 上架: {c.get('published_at')} ({hrs_disp}) | "
+                  f"许可: {lic} | 竞品搜索: {comp} | 主页: {c.get('source_url')}")
     print(f"输出文件路径: {output_path}")
     print(f"去重库路径: {seen_path}")
     print(f"追踪库路径: {tracking_path}")

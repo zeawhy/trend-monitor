@@ -110,6 +110,94 @@ class TestFetchHuggingFace(unittest.TestCase):
         r = self._run(models)
         self.assertEqual(len(r), 5)
 
+    def test_hf_merges_variants(self):
+        # 变体合并测试: 同一组织下只差后缀的模型合并
+        models = [
+            fake_model("black-forest-labs/FLUX.1-dev", created_days_ago=1, pipeline_tag="text-to-image", license_="apache-2.0", ipm=live_mapping(), likes=50),
+            fake_model("black-forest-labs/FLUX.1-schnell", created_days_ago=1, pipeline_tag="text-to-image", license_="apache-2.0", ipm=live_mapping(), likes=80),
+        ]
+        r = self._run(models)
+        self.assertEqual(len(r), 1)
+        item = r[0]
+        self.assertEqual(item["term"], "FLUX.1")
+        self.assertEqual(len(item["variants"]), 2)
+        self.assertEqual(item["heat"], 80)
+        self.assertTrue(item["api_available"])
+        self.assertIn("含 2 个变体", item["note"])
+
+        # seen_terms key 为模型族名
+        seen = {}
+        key = tw.resolve_seen_key(item["term"], item["source_url"], seen)
+        self.assertEqual(key, "flux.1")
+
+    def test_deepseek_flash_marked_version_update_and_watch(self):
+        # 真实样本测试: DeepSeek-V4.1-Flash-1017 被标准化为 DeepSeek-V4.1-Flash
+        # 命中已知产品名单，标记 event_type=version_update，变现路线为 watch
+        models = [
+            fake_model(
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                created_days_ago=1,
+                pipeline_tag="text-generation",
+                license_="mit",
+                ipm=live_mapping()
+            )
+        ]
+        with mock.patch.object(tw, "HfApi", lambda: FakeHfApi(models)):
+            r = tw.fetch_huggingface_trending(seen={})
+
+        self.assertEqual(len(r), 1)
+        item = r[0]
+        self.assertEqual(item["term"], "DeepSeek-V4.1-Flash")
+        self.assertEqual(item["event_type"], "version_update")
+        path, reason = tw.classify_monetization(item)
+        self.assertEqual(path, "watch")
+        self.assertIn("版本更新", reason)
+
+    def test_comfy_org_repost_resolves_base_model(self):
+        # 转载/适配账号（如 Comfy-Org）自动从模型卡 base_model 解析原始模型去重
+        m = fake_model(
+            "Comfy-Org/flux1-dev-fp8",
+            created_days_ago=1,
+            pipeline_tag="text-to-image",
+            license_="apache-2.0",
+            ipm=live_mapping()
+        )
+        m.card_data = FakeCardData({"base_model": "black-forest-labs/FLUX.1-dev", "license": "apache-2.0"})
+        with mock.patch.object(tw, "HfApi", lambda: FakeHfApi([m])):
+            r = tw.fetch_huggingface_trending(seen={})
+
+        self.assertEqual(len(r), 1)
+        item = r[0]
+        self.assertEqual(item["term"], "FLUX.1")
+        self.assertEqual(item["event_type"], "version_update")
+
+    def test_old_product_in_seen_terms_marked_version_update(self):
+        # 历史 seen_terms 中首次发现时间超过 7 天的模型，新后缀仓库标为 version_update
+        seen = {
+            "my-custom-model": {
+                "first_seen_at": (NOW - timedelta(days=15)).isoformat(),
+                "project_url": "https://huggingface.co/org/my-custom-model",
+            }
+        }
+        models = [
+            fake_model(
+                "org/my-custom-model-1017-gguf",
+                created_days_ago=1,
+                pipeline_tag="text-to-image",
+                license_="apache-2.0",
+                ipm=live_mapping()
+            )
+        ]
+        with mock.patch.object(tw, "HfApi", lambda: FakeHfApi(models)):
+            r = tw.fetch_huggingface_trending(seen=seen)
+
+        self.assertEqual(len(r), 1)
+        item = r[0]
+        self.assertEqual(item["term"], "my-custom-model")
+        self.assertEqual(item["event_type"], "version_update")
+        path, _ = tw.classify_monetization(item)
+        self.assertEqual(path, "watch")
+
 
 if __name__ == "__main__":
     unittest.main()

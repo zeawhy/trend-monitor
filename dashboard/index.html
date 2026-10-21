@@ -34,8 +34,10 @@
   .stat .n { font-size: 24px; font-weight: 700; }
   .stat .t { font-size: 12px; color: #8b93a7; margin-top: 4px; }
   .loading { color: #8b93a7; text-align: center; padding: 40px; }
+  .route-quick { color: #f0a35e; }
   .route-wiki { color: #5ea3f0; }
   .route-tool { color: #c45ef0; }
+  .route-watch { color: #e0af68; }
   .route-drop { color: #8b93a7; }
   .spark { display: flex; align-items: flex-end; gap: 2px; height: 28px; min-width: 60px; }
   .sbar { width: 9px; background: #f0a35e; border-radius: 2px; min-height: 2px; }
@@ -54,36 +56,56 @@
 <h2>🆕 最新一轮候选词</h2>
 <div id="latest"><div class="loading">加载中…</div></div>
 
-<h2>⏳ 14天追踪中</h2>
+<h2>⏳ 14天追踪中 <label style="font-size:12px;color:#8b93a7;font-weight:normal;margin-left:14px;cursor:pointer;"><input type="checkbox" id="showLegacy" style="vertical-align:middle;margin-right:4px;"> 显示旧数据 (含已淘汰的 Google Trends 及 HF 泛词)</label></h2>
 <div id="tracking"><div class="loading">加载中…</div></div>
 
 <script>
 async function load(p) { const r = await fetch('data/' + p); return r.json(); }
 function srcName(s) {
   return { github_breakout: 'GitHub', huggingface: 'HF', reddit: 'Reddit',
-           gsc_first_impression: 'GSC', x: 'X' }[s] || s;
+           gsc_first_impression: 'GSC', x: 'X', api_platform: 'API平台' }[s] || s;
 }
 function srcLink(c) {
   return c.source_url ? ` <a class="src-link" href="${c.source_url}" target="_blank" rel="noopener">源地址 ↗</a>` : '';
 }
 function spark(hist) {
   if (!hist || !hist.length) return '<span style="color:#8b93a7">—</span>';
-  const max = Math.max(...hist.map(h => h.heat), 1);
+  const validHeats = hist.map(h => (h.heat != null ? h.heat : 0));
+  const max = Math.max(...validHeats, 1);
   const bars = hist.map(h => {
-    const pct = Math.max(6, Math.round(h.heat / max * 100));
-    return `<div class="sbar" style="height:${pct}%" title="${h.date}: 热度 ${h.heat}"></div>`;
+    const val = h.heat != null ? h.heat : 0;
+    const pct = Math.max(6, Math.round(val / max * 100));
+    const title = h.heat != null ? `${h.date}: 热度 ${h.heat}` : `${h.date}: 热度 —`;
+    return `<div class="sbar" style="height:${pct}%" title="${title}"></div>`;
   }).join('');
   return `<div class="spark">${bars}</div>`;
 }
 function trendArrow(hist) {
   if (!hist || hist.length < 2) return '<span style="color:#8b93a7">—</span>';
-  const a = hist[0].heat, b = hist[hist.length - 1].heat;
+  const a = hist[0].heat != null ? hist[0].heat : 0;
+  const b = hist[hist.length - 1].heat != null ? hist[hist.length - 1].heat : 0;
   if (a <= 0) return '<span style="color:#8b93a7">—</span>';
   if (b >= a * 1.2) return '<span style="color:#5ef0a3">▲ 升温</span>';
   if (b <= a * 0.8) return '<span style="color:#f05e5e">▼ 降温</span>';
   return '<span style="color:#8b93a7">— 平稳</span>';
 }
 function verdict(c) {
+  const p = c.monetization_path;
+  if (p === 'quick_paid_site') {
+    return { t: '⚡ 抢 48 小时窗口：积分制付费站 (quick_paid_site)', c: 'go route-quick' };
+  }
+  if (p === 'tool_page') {
+    return { t: '🛠️ 并入 yuliusbox 工具页 (tool_page)', c: 'go route-tool' };
+  }
+  if (p === 'content') {
+    return { t: '📝 写 yuliuswiki 文章 (content)', c: 'go route-wiki' };
+  }
+  if (p === 'watch') {
+    return { t: '👀 先观察 (watch)', c: 'go route-watch' };
+  }
+  if (p === 'reject') {
+    return { t: '❌ 丢弃 (reject)', c: 'skip route-drop' };
+  }
   const pt = c.jev ? c.jev.is_product_tech : 0;
   const intent = c.jev ? c.jev.intent : c.intent;
   if (pt >= 0.6) {
@@ -119,7 +141,7 @@ function verdict(c) {
       return `<div class="card">
         <div class="term">${c.term}${srcLink(c)}</div>
         <div class="badges">
-          <span class="badge heat">🔥 ${c.heat}</span>
+          <span class="badge heat">${c.heat != null ? '🔥 ' + c.heat : '—'}</span>
           <span class="badge">${srcName(c.source)}</span>
           <span class="badge">${j.intent || c.intent || '未知意图'}</span>
         </div>
@@ -130,23 +152,46 @@ function verdict(c) {
         </div>
         ${c.note ? `<div class="note">${c.note}</div>` : ''}
         <div class="verdict ${v.c}">${v.t}</div>
+        ${c.path_reason ? `<div class="note" style="margin-top:4px;color:#8b93a7;">理由：${c.path_reason}</div>` : ''}
+        ${c.monetization_path === 'quick_paid_site' ? `
+          <div style="margin-top:10px;padding:10px;background:#141a2a;border-radius:6px;font-size:12px;color:#aeb8d0;line-height:1.8;border-left:3px solid #f0a35e;">
+            <div><strong>💰 平台单价：</strong>${c.unit_price ? c.unit_price : '<span style="color:#f0a35e;">需人工确认</span>'}</div>
+            <div><strong>📄 许可/条款：</strong>${c.license_url ? `<a href="${c.license_url}" target="_blank" rel="noopener" class="src-link">${c.license_url} ↗</a>` : '<span style="color:#8b93a7;">需确认</span>'}</div>
+            <div><strong>⏱️ 上架发布：</strong>${c.published_at || '未知'} ${c.hours_since_release != null ? `(距今 ${c.hours_since_release} 小时 · ${c.hours_since_release <= 48 ? '<span style="color:#5ef0a3;">48小时窗口内</span>' : '<span style="color:#f05e5e;">已超过48小时</span>'})` : ''}</div>
+            <div><strong>🔍 竞品检查：</strong>${c.competitor_search_url ? `<a href="${c.competitor_search_url}" target="_blank" rel="noopener" class="src-link">Google 搜索竞品 ("${c.term} free online") ↗</a>` : ''}</div>
+            ${c.variants && c.variants.length > 1 ? `<div><strong>🔀 包含变体 (${c.variants.length})：</strong>${c.variants.map(v => v.endpoint || v.name || v.category).join('、')}</div>` : ''}
+          </div>
+        ` : ''}
       </div>`;
     }).join('');
     // tracking
-    const tb = document.getElementById('tracking');
-    const pending = (tracking || []).filter(t => !t.checked);
-    tb.innerHTML = pending.length
-      ? `<div class="card"><table><tr><th>词</th><th>来源</th><th>首次发现</th><th>热度走势</th><th>当前热度</th><th>趋势</th></tr>` +
-        pending.map(t => {
-          const hist = t.heat_history || [];
-          const cur = hist.length ? hist[hist.length - 1].heat : (t.initial_heat || 0);
-          const srcCell = t.source_url
-            ? `<a class="src-link" href="${t.source_url}" target="_blank" rel="noopener">${srcName(t.source)} ↗</a>`
-            : srcName(t.source);
-          return `<tr><td>${t.term}</td><td>${srcCell}</td><td>${(t.discovered_at || '').slice(0, 10)}</td>` +
-            `<td>${spark(hist)}</td><td>${cur}</td><td>${trendArrow(hist)}</td></tr>`;
-        }).join('') + `</table></div>`
-      : '<div class="card"><div class="note">暂无追踪中的词</div></div>';
+    let showLegacy = false;
+    function renderTracking() {
+      const tb = document.getElementById('tracking');
+      const pending = (tracking || []).filter(t => !t.checked && (showLegacy || !t.legacy));
+      tb.innerHTML = pending.length
+        ? `<div class="card"><table><tr><th>词</th><th>来源</th><th>首次发现</th><th>热度走势</th><th>当前热度</th><th>趋势</th></tr>` +
+          pending.map(t => {
+            const hist = t.heat_history || [];
+            const cur = hist.length ? hist[hist.length - 1].heat : (t.initial_heat != null ? t.initial_heat : null);
+            const curDisplay = cur != null ? cur : '—';
+            const legacyTag = t.legacy ? ' <span style="font-size:10px;padding:2px 6px;border-radius:10px;background:#3d2323;color:#f08080;">旧数据</span>' : '';
+            const srcCell = t.source_url
+              ? `<a class="src-link" href="${t.source_url}" target="_blank" rel="noopener">${srcName(t.source)} ↗</a>`
+              : srcName(t.source);
+            return `<tr><td>${t.term}${legacyTag}</td><td>${srcCell}</td><td>${(t.discovered_at || '').slice(0, 10)}</td>` +
+              `<td>${spark(hist)}</td><td>${curDisplay}</td><td>${trendArrow(hist)}</td></tr>`;
+          }).join('') + `</table></div>`
+        : '<div class="card"><div class="note">暂无追踪中的词</div></div>';
+    }
+    renderTracking();
+    const toggle = document.getElementById('showLegacy');
+    if (toggle) {
+      toggle.addEventListener('change', (e) => {
+        showLegacy = e.target.checked;
+        renderTracking();
+      });
+    }
   } catch (e) {
     document.getElementById('updated').textContent = '数据加载失败：' + e.message;
   }

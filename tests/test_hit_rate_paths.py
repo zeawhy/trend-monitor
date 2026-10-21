@@ -33,6 +33,16 @@ class TestRecordDiscoveredTerms(unittest.TestCase):
             data = json.load(open(p, encoding="utf-8"))
             self.assertEqual(data[0]["monetization_path"], "quick_paid_site")
 
+    def test_records_heat_none_when_heat_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "word_tracking.json")
+            cands = [{"term": "api_model", "source": "api_platform", "heat": None,
+                      "source_url": "https://fal.ai/models/x", "monetization_path": "quick_paid_site"}]
+            tw.record_discovered_terms(cands, p, OLD)
+            data = json.load(open(p, encoding="utf-8"))
+            self.assertIsNone(data[0]["initial_heat"])
+            self.assertEqual(data[0]["heat_history"], [{"date": OLD[:10], "heat": None}])
+
 
 class TestHitRateByPath(unittest.TestCase):
     def test_grouping_and_quick_paid_standard(self):
@@ -66,6 +76,40 @@ class TestHitRateByPath(unittest.TestCase):
             md = open(os.path.join(d, "hit_rate_report.md"), encoding="utf-8").read()
             self.assertIn("各变现路线命中率统计", md)
             self.assertIn("以 page_tracking 第 7 天净收入为准", md)
+
+    def test_legacy_identification_and_exclusion(self):
+        # 1. 验证 is_legacy_tracking_entry 识别逻辑
+        self.assertTrue(tw.is_legacy_tracking_entry({"source": "google_trends", "term": "nfl plus"}))
+        self.assertTrue(tw.is_legacy_tracking_entry({"source": "huggingface", "term": "image 2.1"}))
+        self.assertTrue(tw.is_legacy_tracking_entry({"source": "huggingface", "term": "2.1 comfyui"}))
+        self.assertTrue(tw.is_legacy_tracking_entry({"source": "huggingface", "term": "qwen image"}))
+        self.assertFalse(tw.is_legacy_tracking_entry({"source": "github_breakout", "term": "pdfcraft"}))
+        self.assertFalse(tw.is_legacy_tracking_entry({"source": "huggingface", "term": "Wan2.5-T2V"}))
+
+        # 2. 验证 check_hit_rate 默认排除 legacy 条目，且不删除原始数据
+        with tempfile.TemporaryDirectory() as d:
+            tp = os.path.join(d, "word_tracking.json")
+            data = [
+                rec("active1", "github_breakout", "tool_page", True, True),
+                rec("nfl plus", "google_trends", None, True, False),
+                rec("image 2.1", "huggingface", None, True, False),
+            ]
+            with open(tp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+
+            report = tw.check_hit_rate(tracking_path=tp, output_dir=d)
+            # 活跃追踪数和评估数仅计算 active1，排除 2 个 legacy
+            self.assertEqual(report["overall"]["total_tracked"], 1)
+            self.assertEqual(report["overall"]["total_evaluated"], 1)
+            self.assertEqual(report["overall"]["total_hits"], 1)
+            self.assertEqual(report["overall"]["hit_rate"], "100.0%")
+
+            # 原始数据未删除，且被标记 legacy=True
+            after = json.load(open(tp, encoding="utf-8"))
+            self.assertEqual(len(after), 3)
+            self.assertTrue(next(r for r in after if r["term"] == "nfl plus")["legacy"])
+            self.assertTrue(next(r for r in after if r["term"] == "image 2.1")["legacy"])
+            self.assertFalse(next(r for r in after if r["term"] == "active1").get("legacy", False))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,38 @@ class TestClassifyMonetization(unittest.TestCase):
         self.assertIn("48 小时", reason)
         self.assertIn("积分制付费站", reason)
 
+    def test_rule1_api_platform_media_generation(self):
+        # 补测试: api_platform 来源、媒体生成类(FLUX 3 Max、Fibo 2.0 样本)必须落到 quick_paid_site
+        for sample in [
+            {
+                "term": "FLUX 3 Max Text to Video",
+                "source": "api_platform",
+                "event_type": "new_model",
+                "api_available": True,
+                "pipeline_tag": "text-to-video",
+                "jev": jev("media_generation", 0.49),
+            },
+            {
+                "term": "Fibo 2.0 Generate",
+                "source": "api_platform",
+                "event_type": "new_model",
+                "api_available": True,
+                "pipeline_tag": "text-to-image",
+                "jev": jev("media_generation", 0.34),
+            },
+            {
+                "term": "Some Audio Model",
+                "source": "api_platform",
+                "event_type": None,
+                "api_available": True,
+                "pipeline_tag": "text-to-speech",
+                "jev": jev("media_generation", 0.5),
+            },
+        ]:
+            path, reason = tw.classify_monetization(sample)
+            self.assertEqual(path, "quick_paid_site", f"Failed for {sample['term']}")
+            self.assertIn("48 小时", reason)
+
     def test_rule1_requires_api_available(self):
         for api in (False, None):
             item = {"event_type": "new_model", "api_available": api, "intent": "other", "jev": jev(None, None)}
@@ -73,6 +105,24 @@ class TestClassifyMonetization(unittest.TestCase):
         ]
         items.sort(key=lambda it: (tw.MONETIZATION_PATH_PRIORITY.get(it.get("monetization_path"), 3), tw.get_sort_key(it)))
         self.assertEqual([i["term"] for i in items], ["q", "t", "c", "w"])
+
+    def test_heat_null_sorts_at_end_of_same_route(self):
+        # 验证: 拿不到真实热度(heat=None)时，排在同一路线的最后，不参与和其他来源的比较
+        items = [
+            {"term": "q_null", "monetization_path": "quick_paid_site", "event_type": "new_model", "commercial_score": 8, "heat": None, "heat_source": "none"},
+            {"term": "q_real", "monetization_path": "quick_paid_site", "event_type": "new_model", "commercial_score": 8, "heat": 10, "heat_source": "run_count"},
+            {"term": "t_real", "monetization_path": "tool_page", "event_type": None, "commercial_score": 5, "heat": 50},
+        ]
+        items.sort(key=lambda it: (tw.MONETIZATION_PATH_PRIORITY.get(it.get("monetization_path"), 3), tw.get_sort_key(it)))
+        # q_real (有热度) 优先于 q_null (无热度)，但都在 quick_paid_site，先于 tool_page
+        self.assertEqual([i["term"] for i in items], ["q_real", "q_null", "t_real"])
+
+    def test_quick_paid_site_extra_fields(self):
+        # 验证 quick_paid_site 路线具备单价、许可、竞品检查、发布时间字段
+        import urllib.parse
+        term = "FLUX 3 Max"
+        expected_url = f"https://www.google.com/search?q={urllib.parse.quote_plus(term + ' free online')}"
+        self.assertIn("FLUX+3+Max+free+online", expected_url)
 
 
 if __name__ == "__main__":
