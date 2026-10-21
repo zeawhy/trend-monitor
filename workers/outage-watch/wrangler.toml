@@ -1,0 +1,19 @@
+name = "trend-outage-watch"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# 每小时执行一次断档检测
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+DASHBOARD_URL = "https://trend-dash.pages.dev/data/last_run.json"
+FULL_THRESHOLD_HOURS = "8"
+FAST_THRESHOLD_HOURS = "2"
+SUPPRESSION_HOURS = "6"
+
+# 可选 KV 命名空间 (执行 wrangler kv namespace create OUTAGE_KV 后填入 id)
+# 若未绑定 KV，Worker 会自动降级为实例内存去重
+# [[kv_namespaces]]
+# binding = "OUTAGE_KV"
+# id = "<YOUR_KV_NAMESPACE_ID>"
