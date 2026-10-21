@@ -34,8 +34,10 @@
   .stat .n { font-size: 24px; font-weight: 700; }
   .stat .t { font-size: 12px; color: #8b93a7; margin-top: 4px; }
   .loading { color: #8b93a7; text-align: center; padding: 40px; }
+  .route-quick { color: #f0a35e; }
   .route-wiki { color: #5ea3f0; }
   .route-tool { color: #c45ef0; }
+  .route-watch { color: #e0af68; }
   .route-drop { color: #8b93a7; }
   .spark { display: flex; align-items: flex-end; gap: 2px; height: 28px; min-width: 60px; }
   .sbar { width: 9px; background: #f0a35e; border-radius: 2px; min-height: 2px; }
@@ -61,7 +63,7 @@
 async function load(p) { const r = await fetch('data/' + p); return r.json(); }
 function srcName(s) {
   return { github_breakout: 'GitHub', huggingface: 'HF', reddit: 'Reddit',
-           gsc_first_impression: 'GSC', x: 'X' }[s] || s;
+           gsc_first_impression: 'GSC', x: 'X', api_platform: 'API平台' }[s] || s;
 }
 function srcLink(c) {
   return c.source_url ? ` <a class="src-link" href="${c.source_url}" target="_blank" rel="noopener">源地址 ↗</a>` : '';
@@ -84,6 +86,22 @@ function trendArrow(hist) {
   return '<span style="color:#8b93a7">— 平稳</span>';
 }
 function verdict(c) {
+  const p = c.monetization_path;
+  if (p === 'quick_paid_site') {
+    return { t: '⚡ 抢 48 小时窗口：积分制付费站 (quick_paid_site)', c: 'go route-quick' };
+  }
+  if (p === 'tool_page') {
+    return { t: '🛠️ 并入 yuliusbox 工具页 (tool_page)', c: 'go route-tool' };
+  }
+  if (p === 'content') {
+    return { t: '📝 写 yuliuswiki 文章 (content)', c: 'go route-wiki' };
+  }
+  if (p === 'watch') {
+    return { t: '👀 先观察 (watch)', c: 'go route-watch' };
+  }
+  if (p === 'reject') {
+    return { t: '❌ 丢弃 (reject)', c: 'skip route-drop' };
+  }
   const pt = c.jev ? c.jev.is_product_tech : 0;
   const intent = c.jev ? c.jev.intent : c.intent;
   if (pt >= 0.6) {
@@ -130,6 +148,7 @@ function verdict(c) {
         </div>
         ${c.note ? `<div class="note">${c.note}</div>` : ''}
         <div class="verdict ${v.c}">${v.t}</div>
+        ${c.path_reason ? `<div class="note" style="margin-top:4px;color:#8b93a7;">理由：${c.path_reason}</div>` : ''}
       </div>`;
     }).join('');
     // tracking

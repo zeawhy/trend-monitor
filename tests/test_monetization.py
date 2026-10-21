@@ -20,6 +20,38 @@ class TestClassifyMonetization(unittest.TestCase):
         self.assertIn("48 小时", reason)
         self.assertIn("积分制付费站", reason)
 
+    def test_rule1_api_platform_media_generation(self):
+        # 补测试: api_platform 来源、媒体生成类(FLUX 3 Max、Fibo 2.0 样本)必须落到 quick_paid_site
+        for sample in [
+            {
+                "term": "FLUX 3 Max Text to Video",
+                "source": "api_platform",
+                "event_type": "new_model",
+                "api_available": True,
+                "pipeline_tag": "text-to-video",
+                "jev": jev("media_generation", 0.49),
+            },
+            {
+                "term": "Fibo 2.0 Generate",
+                "source": "api_platform",
+                "event_type": "new_model",
+                "api_available": True,
+                "pipeline_tag": "text-to-image",
+                "jev": jev("media_generation", 0.34),
+            },
+            {
+                "term": "Some Audio Model",
+                "source": "api_platform",
+                "event_type": None,
+                "api_available": True,
+                "pipeline_tag": "text-to-speech",
+                "jev": jev("media_generation", 0.5),
+            },
+        ]:
+            path, reason = tw.classify_monetization(sample)
+            self.assertEqual(path, "quick_paid_site", f"Failed for {sample['term']}")
+            self.assertIn("48 小时", reason)
+
     def test_rule1_requires_api_available(self):
         for api in (False, None):
             item = {"event_type": "new_model", "api_available": api, "intent": "other", "jev": jev(None, None)}

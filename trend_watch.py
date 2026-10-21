@@ -1149,7 +1149,13 @@ def classify_monetization(item: dict) -> tuple:
     """给候选词定变现路线,返回 (monetization_path, path_reason),规则按顺序判断。"""
     jev = item.get('jev') or {}
     # 1. 媒体生成新模型且 API 可用 → 抢 48 小时窗口
-    if item.get('event_type') == 'new_model' and item.get('api_available'):
+    is_media = (
+        item.get('source') == 'api_platform'
+        or jev.get('intent') == 'media_generation'
+        or item.get('pipeline_tag') in HF_MEDIA_PIPELINE_TAGS
+        or _is_media_category(item.get('pipeline_tag') or '')
+    )
+    if (item.get('event_type') == 'new_model' or is_media) and item.get('api_available'):
         return 'quick_paid_site', '抢 48 小时窗口：积分制付费站（媒体生成新模型且 API 可用）'
     # 2. 工具/付费意图 → yuliusbox 工具页
     if item.get('intent') == 'tool' or jev.get('intent') in ('paid_tool', 'media_generation'):
