@@ -1,0 +1,4 @@
+pytrends
+requests
+pandas
+huggingface_hub

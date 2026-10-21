@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-          cache-dependency-path: ''
+          cache-dependency-path: 'requirements.txt'
 
       - name: Set up Deploy Key & SSH
         env:
@@ -120,7 +120,7 @@ jobs:
       - name: Install Python Dependencies
         if: steps.concurrency_check.outputs.run_job == 'true'
         run: |
-          pip install pytrends requests pandas huggingface_hub
+          pip install -r requirements.txt
 
       - name: Run Full Task (trend_watch.py)
         if: steps.concurrency_check.outputs.run_job == 'true'
