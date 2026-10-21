@@ -2358,6 +2358,31 @@ def fetch_api_platform_new_models(seen: dict = None, limit: int = API_PLATFORM_M
 # ---------------------------------------------------------------------------
 # 命中率追踪机制 (Hit Rate Tracking)
 # ---------------------------------------------------------------------------
+def is_legacy_tracking_entry(entry: dict) -> bool:
+    """判定是否为追踪表中的历史旧数据：
+    1. Google Trends 已降为纯验证源前写入的 google_trends 条目；
+    2. 旧版短语提取产生的 HF 泛词（如 'image 2.1', '2.1 comfyui', 'qwen image', 'comfyui diffusion' 等）。
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get('legacy') is True:
+        return True
+    source = entry.get('source')
+    if source == 'google_trends':
+        return True
+    if source == 'huggingface':
+        term = (entry.get('term') or '').strip().lower()
+        legacy_hf = {
+            'qwen image', 'image 2.1', 'qwen image 2.1',
+            '2.1 comfyui', 'comfyui diffusion', 'comfyui diffusion single'
+        }
+        if term in legacy_hf:
+            return True
+        if any(p in term for p in ('image 2.1', '2.1 comfyui', 'comfyui diffusion')):
+            return True
+    return False
+
+
 def load_tracking_data(path: str) -> list:
     """加载候选词命中率追踪文件 hidden_files/word_tracking.json"""
     if os.path.exists(path):
@@ -2457,11 +2482,23 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     beijing_tz = timezone(timedelta(hours=8))
     now = datetime.now(timezone.utc).astimezone(beijing_tz)
 
-    if not tracking_data:
-        print(f"[命中率核验] 追踪库 {tracking_path} 为空，输出初始报告")
+    # 标记 legacy 旧数据（如未显式标记过）
+    legacy_updated = False
+    for item in tracking_data:
+        if is_legacy_tracking_entry(item) and item.get('legacy') is not True:
+            item['legacy'] = True
+            legacy_updated = True
+    if legacy_updated:
+        save_tracking_data(tracking_path, tracking_data)
+
+    # 命中率统计默认排除 legacy 旧条目（已淘汰的 Google Trends 及 HF 泛词）
+    active_data = [item for item in tracking_data if not item.get('legacy')]
+
+    if not active_data:
+        print(f"[命中率核验] 活跃追踪词库为空，输出初始报告")
         report = {
             "generated_at": now.isoformat(),
-            "summary": "追踪词库为空，暂无数据",
+            "summary": "活跃追踪词库为空，暂无数据",
             "overall": {
                 "total_tracked": 0,
                 "total_evaluated": 0,
@@ -2477,7 +2514,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
 
     # 筛选出达到 14 天周期的待核验词
     eval_candidates = []
-    for item in tracking_data:
+    for item in active_data:
         disc_str = item.get('discovered_at', '')
         try:
             disc_dt = datetime.fromisoformat(disc_str)
@@ -2487,7 +2524,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
         except Exception:
             continue
 
-    print(f"[命中率核验] 当前总追踪词数: {len(tracking_data)}，达到 14 天周期的词数: {len(eval_candidates)}")
+    print(f"[命中率核验] 当前总追踪词数: {len(active_data)}（已排除 legacy 旧条目 {len(tracking_data) - len(active_data)} 个），达到 14 天周期的词数: {len(eval_candidates)}")
 
     pt = TrendReq(hl='en-US', tz=360)
 
@@ -2544,12 +2581,12 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     if updated:
         save_tracking_data(tracking_path, tracking_data)
 
-    # 统计各信号源命中率
+    # 统计各信号源命中率（默认排除 legacy 旧条目）
     source_stats = {}
     total_evaluated = 0
     total_hits = 0
 
-    for item in tracking_data:
+    for item in active_data:
         if not item.get('checked'):
             continue
         src = item.get('source', 'unknown')
@@ -2567,7 +2604,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     # 按变现路线统计:content / tool_page 沿用 Trends 标准;quick_paid_site
     # 不用 Trends 判定,标注以 page_tracking 第 7 天净收入为准;旧记录无路线记 legacy
     path_stats = {}
-    for item in tracking_data:
+    for item in active_data:
         p = item.get('monetization_path') or 'legacy'
         if p not in path_stats:
             path_stats[p] = {'total': 0, 'hits': 0, 'tracked': 0}
@@ -2589,7 +2626,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     report = {
         "generated_at": now.isoformat(),
         "overall": {
-            "total_tracked": len(tracking_data),
+            "total_tracked": len(active_data),
             "total_evaluated": total_evaluated,
             "total_hits": total_hits,
             "hit_rate": overall_rate
@@ -2607,7 +2644,7 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
                 "hit": it.get('hit'),
                 "check_time": it.get('check_time')
             }
-            for it in tracking_data if it.get('checked')
+            for it in active_data if it.get('checked')
         ]
     }
 

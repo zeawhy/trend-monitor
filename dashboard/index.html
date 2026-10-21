@@ -56,7 +56,7 @@
 <h2>🆕 最新一轮候选词</h2>
 <div id="latest"><div class="loading">加载中…</div></div>
 
-<h2>⏳ 14天追踪中</h2>
+<h2>⏳ 14天追踪中 <label style="font-size:12px;color:#8b93a7;font-weight:normal;margin-left:14px;cursor:pointer;"><input type="checkbox" id="showLegacy" style="vertical-align:middle;margin-right:4px;"> 显示旧数据 (含已淘汰的 Google Trends 及 HF 泛词)</label></h2>
 <div id="tracking"><div class="loading">加载中…</div></div>
 
 <script>
@@ -156,21 +156,33 @@ function verdict(c) {
       </div>`;
     }).join('');
     // tracking
-    const tb = document.getElementById('tracking');
-    const pending = (tracking || []).filter(t => !t.checked);
-    tb.innerHTML = pending.length
-      ? `<div class="card"><table><tr><th>词</th><th>来源</th><th>首次发现</th><th>热度走势</th><th>当前热度</th><th>趋势</th></tr>` +
-        pending.map(t => {
-          const hist = t.heat_history || [];
-          const cur = hist.length ? hist[hist.length - 1].heat : (t.initial_heat != null ? t.initial_heat : null);
-          const curDisplay = cur != null ? cur : '—';
-          const srcCell = t.source_url
-            ? `<a class="src-link" href="${t.source_url}" target="_blank" rel="noopener">${srcName(t.source)} ↗</a>`
-            : srcName(t.source);
-          return `<tr><td>${t.term}</td><td>${srcCell}</td><td>${(t.discovered_at || '').slice(0, 10)}</td>` +
-            `<td>${spark(hist)}</td><td>${curDisplay}</td><td>${trendArrow(hist)}</td></tr>`;
-        }).join('') + `</table></div>`
-      : '<div class="card"><div class="note">暂无追踪中的词</div></div>';
+    let showLegacy = false;
+    function renderTracking() {
+      const tb = document.getElementById('tracking');
+      const pending = (tracking || []).filter(t => !t.checked && (showLegacy || !t.legacy));
+      tb.innerHTML = pending.length
+        ? `<div class="card"><table><tr><th>词</th><th>来源</th><th>首次发现</th><th>热度走势</th><th>当前热度</th><th>趋势</th></tr>` +
+          pending.map(t => {
+            const hist = t.heat_history || [];
+            const cur = hist.length ? hist[hist.length - 1].heat : (t.initial_heat != null ? t.initial_heat : null);
+            const curDisplay = cur != null ? cur : '—';
+            const legacyTag = t.legacy ? ' <span style="font-size:10px;padding:2px 6px;border-radius:10px;background:#3d2323;color:#f08080;">旧数据</span>' : '';
+            const srcCell = t.source_url
+              ? `<a class="src-link" href="${t.source_url}" target="_blank" rel="noopener">${srcName(t.source)} ↗</a>`
+              : srcName(t.source);
+            return `<tr><td>${t.term}${legacyTag}</td><td>${srcCell}</td><td>${(t.discovered_at || '').slice(0, 10)}</td>` +
+              `<td>${spark(hist)}</td><td>${curDisplay}</td><td>${trendArrow(hist)}</td></tr>`;
+          }).join('') + `</table></div>`
+        : '<div class="card"><div class="note">暂无追踪中的词</div></div>';
+    }
+    renderTracking();
+    const toggle = document.getElementById('showLegacy');
+    if (toggle) {
+      toggle.addEventListener('change', (e) => {
+        showLegacy = e.target.checked;
+        renderTracking();
+      });
+    }
   } catch (e) {
     document.getElementById('updated').textContent = '数据加载失败：' + e.message;
   }

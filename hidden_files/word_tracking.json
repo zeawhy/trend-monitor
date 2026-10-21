@@ -11,7 +11,8 @@
         "date": "2026-10-11",
         "heat": 500
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "ind vs wi t20",
@@ -25,7 +26,8 @@
         "date": "2026-10-11",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "parker washington",
@@ -39,7 +41,8 @@
         "date": "2026-10-11",
         "heat": 2000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "qwen image",
@@ -53,7 +56,8 @@
         "date": "2026-10-11",
         "heat": 133532
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "image 2.1",
@@ -67,7 +71,8 @@
         "date": "2026-10-11",
         "heat": 110137
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "qwen image 2.1",
@@ -81,7 +86,8 @@
         "date": "2026-10-11",
         "heat": 110137
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "2.1 comfyui",
@@ -95,7 +101,8 @@
         "date": "2026-10-11",
         "heat": 86742
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "comfyui diffusion",
@@ -109,7 +116,8 @@
         "date": "2026-10-11",
         "heat": 86742
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "real sociedad - deportivo",
@@ -123,7 +131,8 @@
         "date": "2026-10-11",
         "heat": 2000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "cbs sunday morning",
@@ -137,7 +146,8 @@
         "date": "2026-10-11",
         "heat": 500
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "liverpool - manchester city",
@@ -151,7 +161,8 @@
         "date": "2026-10-11",
         "heat": 20000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "tarleton state football",
@@ -165,7 +176,8 @@
         "date": "2026-10-11",
         "heat": 2000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "carnell tate",
@@ -179,7 +191,8 @@
         "date": "2026-10-11",
         "heat": 500
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "godzilla minus zero king ghidorah trailer",
@@ -193,7 +206,8 @@
         "date": "2026-10-11",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "chicago marathon winner",
@@ -207,7 +221,8 @@
         "date": "2026-10-11",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "giants record",
@@ -221,7 +236,8 @@
         "date": "2026-10-12",
         "heat": 2000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "ny giants standings",
@@ -235,7 +251,8 @@
         "date": "2026-10-12",
         "heat": 500
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "giants score today",
@@ -249,7 +266,8 @@
         "date": "2026-10-12",
         "heat": 500
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "super bowl 2026",
@@ -263,7 +281,8 @@
         "date": "2026-10-12",
         "heat": 1000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "keke palmer",
@@ -277,7 +296,8 @@
         "date": "2026-10-12",
         "heat": 1000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "abner uribe",
@@ -291,7 +311,8 @@
         "date": "2026-10-12",
         "heat": 5000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "carrie book",
@@ -305,7 +326,8 @@
         "date": "2026-10-12",
         "heat": 2000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "tornadoes north carolina",
@@ -319,7 +341,8 @@
         "date": "2026-10-12",
         "heat": 1000
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "ashby brewers",
@@ -333,7 +356,8 @@
         "date": "2026-10-12",
         "heat": 500
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "posiciones de cusco fc contra alianza lima",
@@ -347,7 +371,8 @@
         "date": "2026-10-12",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "rockstar games",
@@ -361,7 +386,8 @@
         "date": "2026-10-12",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "openai",
@@ -375,7 +401,8 @@
         "date": "2026-10-12",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "kospi",
@@ -389,7 +416,8 @@
         "date": "2026-10-12",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "oracle stock",
@@ -403,7 +431,8 @@
         "date": "2026-10-12",
         "heat": 500
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "vz stock",
@@ -417,7 +446,8 @@
         "date": "2026-10-12",
         "heat": 200
       }
-    ]
+    ],
+    "legacy": true
   },
   {
     "term": "pdfcraft",
@@ -432,7 +462,8 @@
         "heat": 910
       }
     ],
-    "source_url": "https://github.com/storytold/pdfcraft"
+    "source_url": "https://github.com/storytold/pdfcraft",
+    "legacy": false
   },
   {
     "term": "lightcraft",
@@ -446,7 +477,8 @@
         "date": "2026-10-13",
         "heat": 902
       }
-    ]
+    ],
+    "legacy": false
   },
   {
     "term": "game war.io",
@@ -460,7 +492,8 @@
         "date": "2026-10-13",
         "heat": 1
       }
-    ]
+    ],
+    "legacy": false
   },
   {
     "term": "ARTEX",
@@ -475,7 +508,8 @@
         "heat": 730
       }
     ],
-    "source_url": "https://github.com/mhtsec/ARTEX"
+    "source_url": "https://github.com/mhtsec/ARTEX",
+    "legacy": false
   },
   {
     "term": "artex framework",
@@ -490,7 +524,8 @@
     ],
     "source_url": "https://www.google.com/search?q=artex%20framework",
     "checked": false,
-    "hit": null
+    "hit": null,
+    "legacy": false
   },
   {
     "term": "solidcraft",
@@ -505,7 +540,8 @@
     ],
     "source_url": "https://github.com/tangency-labs/solidcraft",
     "checked": false,
-    "hit": null
+    "hit": null,
+    "legacy": false
   },
   {
     "term": "comfyui diffusion single",
@@ -520,6 +556,7 @@
     ],
     "source_url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1",
     "checked": false,
-    "hit": null
+    "hit": null,
+    "legacy": true
   }
 ]
