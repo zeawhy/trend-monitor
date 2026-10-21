@@ -259,7 +259,112 @@ python3 trend_watch.py --digest   # 每日日报(每天 9:00): 昨日新机会 T
 
 ---
 
-## 11. 测试
+## 11. 韧性三件套与容灾冷备
+
+### 11.1 Telegram 推送通道
+- 模块：`notifier.py`。
+- 读取环境变量：
+  - `TELEGRAM_BOT_TOKEN`：Telegram 机器人的 Token。
+  - `TELEGRAM_CHAT_ID`：接收通知的 Chat ID（用户或频道）。
+  - `TELEGRAM_ENABLED`：总开关，默认开启（值为 `0` / `false` / `no` / `off` 时禁用）。
+- **静默跳过**：未配置 Token 或 Chat ID 时，自动静默跳过，绝不阻塞主流程。
+- **覆盖场景**：
+  - 新词/新机会发现（全量任务结束后推送，优先展示 `quick_paid_site`）
+  - `--fast` 高频官方新模型发现（即时推送平台、链接与单价）
+  - `--digest` 每日机会与复盘日报（无内容时静默退出不推送）
+  - Jev 健康异常告警
+
+### 11.2 状态备份与恢复 (zeawhy/trend-state)
+每次**全量任务**结束且输出成功后，会自动将最新状态提交并推送到私有仓库 `zeawhy/trend-state`。
+- **一次运行只提交一次**（单 commit），失败仅记录日志，不影响主流程。
+- **`--fast` 高频任务与 `--dry-run` 不备份**。
+- **认证凭证**：使用专用 SSH deploy key（`~/.ssh/trend_state_deploy_key`）。
+
+#### 状态文件清单
+| 文件路径 | 说明 |
+| :--- | :--- |
+| `outputs/seen_terms.json` | 已处理词状态库（去重、发现时间、版本与最后通知/过滤状态） |
+| `hidden_files/word_tracking.json` | 候选词 14 天命中率追踪库 |
+| `hidden_files/page_tracking.json` | 页面变现效果、收录状态与 PnL 收益明细 |
+| `outputs/opportunities.json` | 全生命周期机会看板数据 |
+| `hidden_files/gsc_seen_queries.json` | Google Search Console 首次展现 query 基线 |
+| `outputs/github_breakout_state.json` | GitHub breakout 历史候选与套件记录 |
+| `outputs/last_seen.json` | 最新一轮产出文件路径记录 |
+| `outputs/jev_health.json` | Jev 最近 5 轮打分成功率与健康记录 |
+| `dashboard/data/last_run.json` / `last_run.json` | 全量任务与 Fast 任务最后运行时间戳 `{full_at, fast_at, status}` |
+
+#### 本地恢复状态
+当本机状态丢失或需要拉取最新状态时，执行恢复脚本：
+```bash
+python3 restore_state.py
+```
+*注：脚本在覆盖本地文件前，会自动将当前本地状态完整备份到 `backups/pre_restore_<timestamp>/`。*
+
+### 11.3 断档报警 (Cloudflare Worker)
+- 源码目录：`workers/outage-watch/`
+- 触发方式：Cron Trigger 每小时一次（`0 * * * *`）。
+- 逻辑：
+  - GET 看板公开的 `https://trend-dash.pages.dev/data/last_run.json`。
+  - `full_at` 超过 8 小时 或 `fast_at` 超过 2 小时未运行 → 发送 Telegram 报警。
+  - **同一种报警 6 小时内最多发一次**（支持 KV 命名空间去重，未绑定 KV 时内存降级去重）。
+  - 故障恢复后自动发送一条"已恢复"通知。
+- 部署与配置见 [workers/outage-watch/README.md](file:///home/hatch/workspace/trend-monitor-resilience/workers/outage-watch/README.md)。
+
+### 11.4 GitHub Actions 冷备 (.github/workflows/standby.yml)
+平时只用 `workflow_dispatch` 手动触发，不开启定时 schedule。
+- 运行流程：
+  1. 检出代码并配置 deploy key
+  2. **并发保护**：检查 `trend-state` 里的 `last_run.json`，若 VM 在最近 3 小时内刚跑过全量任务，**直接退出 (exit 0)**，避免与 VM 重复并发
+  3. 执行 `restore_state.py` 恢复状态
+  4. 执行 `trend_watch.py` 全量任务
+  5. 自动写回最新状态至 `trend-state`
+  6. 重新部署控制台看板至 Cloudflare Pages 并通过 Telegram 推送结果
+- 依赖 GitHub Secrets：
+  - `OPENROUTER_API_KEY`
+  - `TELEGRAM_BOT_TOKEN`
+  - `TELEGRAM_CHAT_ID`
+  - `TREND_STATE_DEPLOY_KEY`（zeawhy/trend-state 的 SSH deploy key 私钥）
+  - `CLOUDFLARE_API_TOKEN`（看板 Pages 部署用）
+
+### 11.5 VM 故障时如何切换
+
+#### 1. 切换到 GitHub Actions 托管
+当 VM 发生宕机或长时间停机时：
+1. **停止 VM 上的 cron**：
+   若 VM 仍可连接，登录并注释掉 crontab：
+   ```bash
+   crontab -e
+   # 注释掉 trend_watch.py 相关的 3 行定时任务
+   ```
+2. **启用 Actions 定时调度**：
+   编辑 `.github/workflows/standby.yml`，在 `on:` 下添加 `schedule`：
+   ```yaml
+   on:
+     schedule:
+       - cron: '0 */6 * * *'  # 每 6 小时执行一次全量任务
+     workflow_dispatch:
+   ```
+   提交并推送到 GitHub，Actions 将按每 6 小时自动执行并同步状态到 `trend-state`。
+
+#### 2. VM 恢复后切回本地
+当 VM 维修完成重新上线时：
+1. **先停止 Actions schedule**：
+   在 `.github/workflows/standby.yml` 中删去或注释掉 `schedule:` 行并推送到 GitHub。
+2. **在 VM 上恢复最新状态**：
+   进入 VM 项目目录，运行恢复脚本拉取 Actions 运行期间积累的最新状态：
+   ```bash
+   cd ~/workspace/trend-monitor
+   python3 restore_state.py
+   ```
+3. **重新启用 VM cron**：
+   ```bash
+   crontab -e
+   # 取消 trend_watch.py 定时任务的注释
+   ```
+
+---
+
+## 12. 测试
 
 ```bash
 python3 -m unittest discover -s tests
@@ -269,7 +374,7 @@ python3 -m unittest discover -s tests
 
 ---
 
-## 12. 已知限制
+## 13. 已知限制
 
 1. **人名过滤为启发式规则**：极生僻外国名且标题无职务关键词时可能有边缘误差。
 2. **Google Trends 频率限制**：命中率核验内置 1.2 秒节流；Trends 返回空时该词计未命中。
