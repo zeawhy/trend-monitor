@@ -598,8 +598,76 @@ def migrate_seen_entry(entry) -> dict:
     return migrated
 
 
+GITHUB_ORG_SUITE_DAYS = 30         # 组织跨轮套件统计窗口（天）
+GITHUB_ORG_SUITE_THRESHOLD = 3    # 组织近 30 天已推送仓库合并阈值
+
+
+def get_org_recent_pushed_repos(seen: dict, org: str, days: int = GITHUB_ORG_SUITE_DAYS, now: datetime = None) -> list:
+    """获取指定 GitHub org 在近 days 天内已经推送过的仓库列表。
+    优先读取 seen['_github_org_pushed'][org]，同时兼容扫描历史 seen_terms 记录。"""
+    if not seen:
+        return []
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+
+    org_lower = org.strip().lower()
+    pushed = []
+    seen_repos = set()
+
+    # 1. 读取维护的 _github_org_pushed 记录
+    org_stats = seen.get('_github_org_pushed') or {}
+    if isinstance(org_stats, dict):
+        for rec in org_stats.get(org_lower, []):
+            repo = rec.get('repo')
+            ts = rec.get('pushed_at')
+            if repo and ts and repo not in seen_repos:
+                try:
+                    p_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    if p_dt >= cutoff:
+                        pushed.append(rec)
+                        seen_repos.add(repo)
+                except Exception:
+                    pass
+
+    # 2. 兼容扫描历史 seen_terms 中的条目
+    for k, entry in seen.items():
+        if k.startswith('_') or not isinstance(entry, dict):
+            continue
+        last_notified = entry.get('last_notified_at')
+        if not last_notified:
+            continue
+        url = entry.get('project_url') or ''
+        if 'github.com/' in url:
+            parts = url.split('github.com/')[-1].strip('/').split('/')
+            if len(parts) >= 2 and parts[0].lower() == org_lower:
+                repo_name = f"{parts[0]}/{parts[1]}"
+                if repo_name not in seen_repos:
+                    try:
+                        p_dt = datetime.fromisoformat(last_notified.replace('Z', '+00:00'))
+                        if p_dt >= cutoff:
+                            rec = {'repo': repo_name, 'pushed_at': last_notified}
+                            pushed.append(rec)
+                            seen_repos.add(repo_name)
+                    except Exception:
+                        pass
+
+    return pushed
+
+
+def record_org_pushed_repo(seen: dict, org: str, repo: str, pushed_at_iso: str):
+    """记录某组织推送了新仓库到 seen['_github_org_pushed']"""
+    if not seen or not org or not repo:
+        return
+    org_lower = org.strip().lower()
+    org_stats = seen.setdefault('_github_org_pushed', {})
+    records = org_stats.setdefault(org_lower, [])
+    if not any(r.get('repo') == repo for r in records):
+        records.append({'repo': repo, 'pushed_at': pushed_at_iso})
+
+
 def seen_needs_migration(data: dict) -> bool:
-    return any(isinstance(v, dict) and 'first_seen_at' not in v for v in data.values())
+    return any(not k.startswith('_') and isinstance(v, dict) and 'first_seen_at' not in v for k, v in data.items())
 
 
 def backup_seen_terms(path: str):
@@ -620,8 +688,8 @@ def load_seen_terms(path: str) -> dict:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    for v in data.values():
-                        if isinstance(v, dict):
+                    for k, v in data.items():
+                        if not k.startswith('_') and isinstance(v, dict):
                             _invalidate_legacy_jev(v)
                     return data
         except Exception as e:
@@ -720,6 +788,17 @@ def mark_run_results(final_items: list, filtered_items: list, seen: dict, now_is
             continue
         entry['last_notified_at'] = now_iso
         entry['last_notified_reason'] = item.get('_notify_reason')
+        # 记录 GitHub 仓库推送历史用于跨轮组织级套件统计
+        if item.get('source') == 'github_breakout':
+            if item.get('members'):
+                for repo in item.get('members'):
+                    record_org_pushed_repo(seen, item.get('org') or repo.split('/')[0], repo, now_iso)
+            else:
+                url = item.get('source_url', '')
+                if 'github.com/' in url:
+                    parts = url.split('github.com/')[-1].strip('/').split('/')
+                    if len(parts) >= 2:
+                        record_org_pushed_repo(seen, parts[0], f"{parts[0]}/{parts[1]}", now_iso)
     for item, reason in filtered_items:
         entry = seen.get(item.get('_seen_key') or '')
         if entry is None:
@@ -1497,10 +1576,11 @@ def fetch_huggingface_trending():
 # ---------------------------------------------------------------------------
 # 数据源 4: GitHub breakout 仓库 (GitHub Search API)
 # ---------------------------------------------------------------------------
-def fetch_github_breakout():
+def fetch_github_breakout(seen: dict = None):
     """抓取 GitHub 新建仓库 breakout 信号：创建不足 14 天、日均涨星 200+ 或总星 400+。
     仓库名本身即产品/技术新词（如 docling、browser-use），用简介做上下文。
     未认证限流 10 req/min，本轮只打 1 次请求。
+    跨轮去重：同一组织近 30 天已推送 ≥3 个仓库时，新仓库不再单独推送，并入该组织的套件条目。
     """
     results = []
     print("[GitHub] 开始抓取 breakout 仓库...")
@@ -1587,7 +1667,7 @@ def fetch_github_breakout():
             "description": (q['repo'].get('description') or '').strip(),
         })
 
-    def emit_suite(org, members):
+    def emit_suite(org, members, is_series_batch=False, prior_count=0):
         members_sorted = sorted(members, key=lambda m: m['stars'], reverse=True)
         total_stars = sum(m['stars'] for m in members_sorted)
         member_list = '、'.join(
@@ -1604,6 +1684,10 @@ def fetch_github_breakout():
         intent = classify_intent(suite_term, context)
         commercial_score = score_commercial(suite_term, context, intent=intent)
         event_type = classify_event_type(suite_term, context)
+        if is_series_batch:
+            note = f"同组织系列，疑似批量发布：{org} 近{GITHUB_ORG_SUITE_DAYS}天已推{prior_count}个仓库，本轮更新{len(members_sorted)}个仓库：{member_list}"
+        else:
+            note = f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}"
         results.append({
             "term": suite_term,
             "source": "github_breakout",
@@ -1611,15 +1695,19 @@ def fetch_github_breakout():
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"GitHub套件级爆发：{org} 一次推出{len(members_sorted)}个仓库，累计{total_stars}星：{member_list}",
+            "note": note,
             "source_url": f"https://github.com/{org}",
             "description": context,
+            "members": [m['repo'].get('full_name', '') for m in members_sorted],
+            "org": org,
         })
-        print(f"[GitHub] {org} 套件去重：{len(members_sorted)}个仓库合并为1个套件候选")
+        print(f"[GitHub] {org} 套件去重：{len(members_sorted)}个仓库合并为1个套件候选 (疑似批量发布={is_series_batch})")
 
     for org, members in sorted(by_org.items(), key=lambda kv: -sum(m['stars'] for m in kv[1])):
-        if len(members) >= 3:
-            emit_suite(org, members)
+        prior_pushed = get_org_recent_pushed_repos(seen, org, days=GITHUB_ORG_SUITE_DAYS, now=now) if seen else []
+        is_cross_run_series = len(prior_pushed) >= GITHUB_ORG_SUITE_THRESHOLD
+        if len(members) >= GITHUB_ORG_SUITE_THRESHOLD or is_cross_run_series:
+            emit_suite(org, members, is_series_batch=is_cross_run_series, prior_count=len(prior_pushed))
         else:
             for m in members:
                 emit_single(m)
@@ -2522,7 +2610,7 @@ def main(dry_run: bool = False):
 
     # 1. GitHub breakout 仓库 (新增信号源)
     try:
-        gh_results = fetch_github_breakout()
+        gh_results = fetch_github_breakout(seen=seen)
         all_candidates.extend(gh_results)
     except Exception as e:
         print(f"[GitHub] 处理发生未知异常: {e}")
