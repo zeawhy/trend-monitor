@@ -2865,6 +2865,32 @@ def main(dry_run: bool = False):
             continue
         c['monetization_path'] = path
         c['path_reason'] = path_reason
+
+        # quick_paid_site 路线补充字段：单价、条款、发布时间与距今小时数、竞品检查
+        if path == 'quick_paid_site':
+            term_name = c.get('term', '')
+            c['competitor_search_url'] = f"https://www.google.com/search?q={urllib.parse.quote_plus(term_name + ' free online')}"
+            if not c.get('license_url'):
+                if c.get('platform') == 'fal.ai' or (c.get('source_url') and 'fal.ai' in c['source_url']):
+                    c['license_url'] = 'https://fal.ai/terms'
+                elif c.get('platform') == 'replicate' or (c.get('source_url') and 'replicate.com' in c['source_url']):
+                    c['license_url'] = 'https://replicate.com/terms'
+                elif c.get('source') == 'huggingface':
+                    c['license_url'] = c.get('source_url') or 'https://huggingface.co'
+
+            pub_str = c.get('published_at')
+            if pub_str:
+                try:
+                    pub_dt = datetime.fromisoformat(str(pub_str).replace('Z', '+00:00'))
+                    c['hours_since_release'] = round((now_bj - pub_dt).total_seconds() / 3600.0, 1)
+                except Exception:
+                    c['hours_since_release'] = None
+            else:
+                c['hours_since_release'] = None
+
+            if 'unit_price' not in c:
+                c['unit_price'] = None
+
         path_counts[path] = path_counts.get(path, 0) + 1
         routed.append(c)
     output_candidates = routed
@@ -2926,8 +2952,13 @@ def main(dry_run: bool = False):
     if quick:
         print("\n--- 🚀 quick_paid_site（抢 48 小时窗口：积分制付费站） ---")
         for c in quick:
-            print(f"- {c.get('term')} | 模型类型: {c.get('pipeline_tag')} | "
-                  f"api_available: {c.get('api_available')} | license: {c.get('license')} | {c.get('source_url')}")
+            price_disp = c.get('unit_price') if c.get('unit_price') else "需人工确认 (null)"
+            hrs = c.get('hours_since_release')
+            hrs_disp = f"距今 {hrs}h ({'48h窗口内' if hrs is not None and hrs <= 48 else '超48h'})" if hrs is not None else "发布时间未知"
+            lic = c.get('license_url') or c.get('license') or "无"
+            comp = c.get('competitor_search_url') or ""
+            print(f"- {c.get('term')} | 单价: {price_disp} | 上架: {c.get('published_at')} ({hrs_disp}) | "
+                  f"许可: {lic} | 竞品搜索: {comp} | 主页: {c.get('source_url')}")
     print(f"输出文件路径: {output_path}")
     print(f"去重库路径: {seen_path}")
     print(f"追踪库路径: {tracking_path}")

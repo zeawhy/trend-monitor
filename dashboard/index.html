@@ -153,6 +153,15 @@ function verdict(c) {
         ${c.note ? `<div class="note">${c.note}</div>` : ''}
         <div class="verdict ${v.c}">${v.t}</div>
         ${c.path_reason ? `<div class="note" style="margin-top:4px;color:#8b93a7;">理由：${c.path_reason}</div>` : ''}
+        ${c.monetization_path === 'quick_paid_site' ? `
+          <div style="margin-top:10px;padding:10px;background:#141a2a;border-radius:6px;font-size:12px;color:#aeb8d0;line-height:1.8;border-left:3px solid #f0a35e;">
+            <div><strong>💰 平台单价：</strong>${c.unit_price ? c.unit_price : '<span style="color:#f0a35e;">需人工确认</span>'}</div>
+            <div><strong>📄 许可/条款：</strong>${c.license_url ? `<a href="${c.license_url}" target="_blank" rel="noopener" class="src-link">${c.license_url} ↗</a>` : '<span style="color:#8b93a7;">需确认</span>'}</div>
+            <div><strong>⏱️ 上架发布：</strong>${c.published_at || '未知'} ${c.hours_since_release != null ? `(距今 ${c.hours_since_release} 小时 · ${c.hours_since_release <= 48 ? '<span style="color:#5ef0a3;">48小时窗口内</span>' : '<span style="color:#f05e5e;">已超过48小时</span>'})` : ''}</div>
+            <div><strong>🔍 竞品检查：</strong>${c.competitor_search_url ? `<a href="${c.competitor_search_url}" target="_blank" rel="noopener" class="src-link">Google 搜索竞品 ("${c.term} free online") ↗</a>` : ''}</div>
+            ${c.variants && c.variants.length > 1 ? `<div><strong>🔀 包含变体 (${c.variants.length})：</strong>${c.variants.map(v => v.endpoint || v.name || v.category).join('、')}</div>` : ''}
+          </div>
+        ` : ''}
       </div>`;
     }).join('');
     // tracking

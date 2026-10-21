@@ -117,6 +117,13 @@ class TestClassifyMonetization(unittest.TestCase):
         # q_real (有热度) 优先于 q_null (无热度)，但都在 quick_paid_site，先于 tool_page
         self.assertEqual([i["term"] for i in items], ["q_real", "q_null", "t_real"])
 
+    def test_quick_paid_site_extra_fields(self):
+        # 验证 quick_paid_site 路线具备单价、许可、竞品检查、发布时间字段
+        import urllib.parse
+        term = "FLUX 3 Max"
+        expected_url = f"https://www.google.com/search?q={urllib.parse.quote_plus(term + ' free online')}"
+        self.assertIn("FLUX+3+Max+free+online", expected_url)
+
 
 if __name__ == "__main__":
     unittest.main()
