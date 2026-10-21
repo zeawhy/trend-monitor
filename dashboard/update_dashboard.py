@@ -44,6 +44,11 @@ tracking = load(os.path.join(HID, 'word_tracking.json'), [])
 with open(os.path.join(DATA, 'tracking.json'), 'w') as f:
     json.dump(tracking, f, ensure_ascii=False)
 
+# 机会看板
+opps = load(os.path.join(OUT, 'opportunities.json'), [])
+with open(os.path.join(DATA, 'opportunities.json'), 'w') as f:
+    json.dump(opps, f, ensure_ascii=False)
+
 # meta
 with open(os.path.join(DATA, 'meta.json'), 'w') as f:
     json.dump({'updated_at': last_seen.get('updated_at', hr.get('generated_at', ''))}, f, ensure_ascii=False)
