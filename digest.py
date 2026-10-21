@@ -174,6 +174,11 @@ def run_digest(dry_run: bool = False) -> str:
         # 无内容静默退出，不输出空日报
         return ""
     print(digest_text)
+    try:
+        from notifier import notify_digest
+        notify_digest(digest_text)
+    except Exception as e:
+        print(f"[Notifier] 日报推送异常: {e}", file=sys.stderr)
     return digest_text
 
 
