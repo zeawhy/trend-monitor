@@ -417,12 +417,85 @@ EXTRA_GOSSIP_PATTERNS = re.compile(
     re.I
 )
 
+KNOWN_PRODUCTS = {
+    "deepseek-v4.1-flash",
+    "deepseek-v4",
+    "deepseek-v3",
+    "deepseek-r1",
+    "deepseek-coder",
+    "flux.1",
+    "flux-1",
+    "flux-3",
+    "sdxl",
+    "stable-diffusion",
+    "sd-3.5",
+    "llama-3",
+    "llama-3.1",
+    "llama-3.2",
+    "mistral-7b",
+    "mixtral",
+    "qwen-2.5",
+    "qwen-2",
+    "qwen2.5-coder",
+    "wan2.1",
+    "wan2.5",
+    "cogvideox",
+}
+
+REPOST_ACCOUNTS = {
+    "comfy-org",
+    "city96",
+    "bartowski",
+    "kijai",
+    "quantfactory",
+    "thebloke",
+}
+
+VERSION_UPDATE_SEEN_DAYS = 7  # first_seen_at 超过 7 天视作老产品版本更新
+
+
+def is_known_or_old_product(name: str, seen: dict = None, now: datetime = None) -> bool:
+    """判断标准化后的模型名是否已在已知产品名单中，或在 seen_terms 中首次发现时间超过 7 天。"""
+    if not name:
+        return False
+    clean = name.strip().lower()
+    clean_slug = re.sub(r'[\s_]+', '-', clean)
+    clean_space = re.sub(r'[\-_]+', ' ', clean)
+
+    for cand in (clean, clean_slug, clean_space):
+        if cand in KNOWN_PRODUCTS:
+            return True
+
+    if not seen:
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    for k, entry in seen.items():
+        if k.startswith('_') or not isinstance(entry, dict):
+            continue
+        k_norm = normalize_model_name(k).lower()
+        k_slug = re.sub(r'[\s_]+', '-', k_norm)
+        k_space = re.sub(r'[\-_]+', ' ', k_norm)
+        if any(c in (k_norm, k_slug, k_space) for c in (clean, clean_slug, clean_space)):
+            first_seen = entry.get('first_seen_at') or entry.get('first_seen')
+            if first_seen:
+                try:
+                    fs_dt = datetime.fromisoformat(first_seen.replace('Z', '+00:00'))
+                    if (now - fs_dt).total_seconds() > VERSION_UPDATE_SEEN_DAYS * 86400:
+                        return True
+                except Exception:
+                    pass
+    return False
+
+
 EVENT_TYPE_PRIORITY = {
     'new_model': -1,
     'product_launch': 0,
-    'policy': 1,
-    'gossip': 2,
-    None: 3
+    'version_update': 1,
+    'policy': 2,
+    'gossip': 3,
+    None: 4
 }
 
 
@@ -1242,6 +1315,9 @@ MONETIZATION_GENERIC_NEWS_MAX = 0.4  # jev.intent=generic 且 newsworthiness 低
 def classify_monetization(item: dict) -> tuple:
     """给候选词定变现路线,返回 (monetization_path, path_reason),规则按顺序判断。"""
     jev = item.get('jev') or {}
+    # 0. 老产品版本更新 / 量化 / 衍生格式 → 默认先观察 (watch)
+    if item.get('event_type') == 'version_update':
+        return 'watch', '老产品版本更新/量化/衍生格式，默认先观察'
     # 1. 媒体生成新模型且 API 可用 → 抢 48 小时窗口
     is_media = (
         item.get('source') == 'api_platform'
@@ -1423,12 +1499,14 @@ def _hf_model_license(m):
     return None
 
 
-def fetch_huggingface_trending():
+def fetch_huggingface_trending(seen: dict = None):
     """抓取 Hugging Face 新模型信号:只用 trendingScore 排序拉候选,只保留
     created_at 在 7 天内的模型(不用 last_modified,避免老模型更新混入);
     一个模型输出一条结果,term = 模型名(去组织前缀、保留版本号与连字符,
     如 Wan2.5-T2V),不再把模型名/标签拆成 2-4 词泛短语。
     媒体生成类 pipeline + API 可用 + 许可证未明确禁止商用 → event_type=new_model。
+    老产品版本更新/量化/衍生格式（在已知名单或已见超过7天）→ event_type=version_update。
+    转载/适配账号（如 Comfy-Org）尝试从模型卡解析 base_model 去重。
     """
     results = []
     print("[HuggingFace] 开始抓取 trendingScore 新模型...")
@@ -1473,6 +1551,20 @@ def fetch_huggingface_trending():
         if not model_name:
             continue
         org = model_id.split('/')[0] if '/' in model_id else ''
+
+        # Comfy-Org 等转载、适配账号发的模型：先尝试从模型卡找原始模型 (base_model 字段) 用原始模型名字去重
+        if org.lower() in REPOST_ACCOUNTS:
+            card_data = getattr(m, 'card_data', None) or getattr(m, 'cardData', None)
+            if hasattr(card_data, 'to_dict'):
+                card_data = card_data.to_dict()
+            if isinstance(card_data, dict):
+                bm = card_data.get('base_model')
+                if isinstance(bm, list) and bm:
+                    bm = bm[0]
+                if bm and isinstance(bm, str):
+                    print(f"[HuggingFace] 转载账号 {org}/{model_name} 解析到 base_model: {bm}")
+                    model_name = bm.split('/')[-1]
+
         pipeline_tag = getattr(m, 'pipeline_tag', None)
         license_str = _hf_model_license(m)
 
@@ -1536,18 +1628,24 @@ def fetch_huggingface_trending():
         context = fam["context"]
         intent = classify_intent(family_name, context)
         commercial_score = score_commercial(family_name, context, intent=intent)
-        event_type = classify_event_type(family_name, context)
+
+        # 检查是否为已知产品或在历史 seen_terms 中 >7 天的老产品
+        is_version_update = is_known_or_old_product(family_name, seen=seen, now=datetime.now(timezone.utc))
 
         api_available = fam["api_available"]
         pipeline_tag = fam["pipeline_tag"]
         license_str = fam["license"]
 
-        if (
+        if is_version_update:
+            event_type = 'version_update'
+        elif (
             pipeline_tag in HF_MEDIA_PIPELINE_TAGS
             and api_available
             and not _license_blocks_commercial(license_str)
         ):
             event_type = 'new_model'
+        else:
+            event_type = classify_event_type(family_name, context)
 
         var_count = len(fam["variants"])
         note_var = f"(含 {var_count} 个变体)" if var_count > 1 else ""
@@ -2617,7 +2715,7 @@ def main(dry_run: bool = False):
 
     # 2. HuggingFace 趋势模型
     try:
-        hf_results = fetch_huggingface_trending()
+        hf_results = fetch_huggingface_trending(seen=seen)
         all_candidates.extend(hf_results)
     except Exception as e:
         print(f"[HuggingFace] 处理发生未知异常: {e}")
