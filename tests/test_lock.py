@@ -22,16 +22,37 @@ class TestConcurrencyLock(unittest.TestCase):
         with lock2:
             self.assertTrue(True)
 
-    def test_timeout_when_locked(self):
-        lock1 = ConcurrencyLock(self.lock_file, timeout=2.0)
-        lock2 = ConcurrencyLock(self.lock_file, timeout=0.5, poll_interval=0.1)
+    def test_reentrancy(self):
+        lock1 = ConcurrencyLock(self.lock_file, timeout=1.0)
+        lock2 = ConcurrencyLock(self.lock_file, timeout=1.0)
+        with lock1:
+            # Nested acquire on same thread should succeed without blocking
+            with lock2:
+                self.assertTrue(True)
 
-        lock1.acquire()
+    def test_timeout_when_locked(self):
+        import threading
+        acquired_evt = threading.Event()
+        release_evt = threading.Event()
+
+        def worker():
+            lock1 = ConcurrencyLock(self.lock_file, timeout=2.0)
+            lock1.acquire()
+            acquired_evt.set()
+            release_evt.wait()
+            lock1.release()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        acquired_evt.wait()
+
+        lock2 = ConcurrencyLock(self.lock_file, timeout=0.3, poll_interval=0.05)
         try:
             with self.assertRaises(TimeoutError):
                 lock2.acquire()
         finally:
-            lock1.release()
+            release_evt.set()
+            t.join()
 
         # Now lock2 should be able to acquire
         self.assertTrue(lock2.acquire())
