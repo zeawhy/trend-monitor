@@ -1,0 +1,14 @@
+{
+  "name": "trend-outage-watch",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker cron watcher for trend-monitor outage detection",
+  "main": "src/index.js",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.151.3"
+  }
+}

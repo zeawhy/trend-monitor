@@ -5,3 +5,6 @@ __pycache__/
 *.lock
 .trend_watch.lock
 *.bak-*
+backups/
+deploy_key_*
+

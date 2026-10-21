@@ -53,4 +53,10 @@ with open(os.path.join(DATA, 'opportunities.json'), 'w') as f:
 with open(os.path.join(DATA, 'meta.json'), 'w') as f:
     json.dump({'updated_at': last_seen.get('updated_at', hr.get('generated_at', ''))}, f, ensure_ascii=False)
 
+# 断档监控 last_run.json
+last_run = load(os.path.join(DATA, 'last_run.json'), {}) or load(os.path.join(OUT, 'last_run.json'), {})
+if last_run:
+    with open(os.path.join(DATA, 'last_run.json'), 'w') as f:
+        json.dump(last_run, f, ensure_ascii=False, indent=2)
+
 print('dashboard data updated:', latest_path)

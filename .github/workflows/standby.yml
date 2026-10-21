@@ -1,0 +1,151 @@
+name: Standby Full Run
+
+# 只用 workflow_dispatch 手动触发，默认不开 schedule
+# 当 VM 发生故障时，可按 README 指引开启 schedule: - cron: '0 */6 * * *'
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run 模式 (只抓取打分，不写回状态且不更新看板)'
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: '忽略 3 小时 VM 并发保护，强制执行全量任务'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  standby-run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout trend-monitor
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: ''
+
+      - name: Set up Deploy Key & SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.TREND_STATE_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          if [ -n "$DEPLOY_KEY" ]; then
+            echo "$DEPLOY_KEY" > ~/.ssh/trend_state_deploy_key
+            chmod 600 ~/.ssh/trend_state_deploy_key
+          else
+            echo "::warning ::TREND_STATE_DEPLOY_KEY secret 未配置"
+          fi
+
+      - name: Concurrency Protection (检查 trend-state 最近运行)
+        id: concurrency_check
+        run: |
+          # 检查是否强制执行
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            echo "run_job=true" >> "$GITHUB_OUTPUT"
+            echo "强制执行模式 (force=true)，跳过并发保护检查"
+            exit 0
+          fi
+
+          if [ ! -f ~/.ssh/trend_state_deploy_key ]; then
+            echo "run_job=true" >> "$GITHUB_OUTPUT"
+            echo "未配置 deploy key，跳过并发检查"
+            exit 0
+          fi
+
+          # 克隆 trend-state 读取 last_run.json
+          TMP_DIR=$(mktemp -d)
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/trend_state_deploy_key -o StrictHostKeyChecking=accept-new" \
+            git clone --depth 1 git@github.com:zeawhy/trend-state.git "$TMP_DIR" || true
+
+          python3 - <<EOF
+          import json, os, sys
+          from datetime import datetime, timezone
+
+          tmp_dir = "$TMP_DIR"
+          paths = [
+              os.path.join(tmp_dir, "last_run.json"),
+              os.path.join(tmp_dir, "dashboard", "data", "last_run.json"),
+          ]
+          last_run_file = next((p for p in paths if os.path.exists(p)), None)
+
+          if not last_run_file:
+              print("trend-state 中未找到 last_run.json，允许执行")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("run_job=true\n")
+              sys.exit(0)
+
+          try:
+              with open(last_run_file) as f:
+                  data = json.load(f)
+              full_at = data.get("full_at")
+              if not full_at:
+                  print("未找到 full_at 记录，允许执行")
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                      f.write("run_job=true\n")
+                  sys.exit(0)
+
+              dt = datetime.fromisoformat(full_at.replace("Z", "+00:00"))
+              now = datetime.now(timezone.utc)
+              diff_hours = (now - dt).total_seconds() / 3600.0
+
+              if diff_hours < 3.0:
+                  print(f"VM 在 {diff_hours:.2f} 小时内刚跑过全量任务 (< 3.0h)，为避免重复抓取直接退出 (exit 0)")
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                      f.write("run_job=false\n")
+              else:
+                  print(f"上次全量运行距今 {diff_hours:.2f} 小时 (>= 3.0h)，允许冷备执行")
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                      f.write("run_job=true\n")
+          except Exception as e:
+              print(f"解析 last_run.json 异常: {e}，默认放行")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("run_job=true\n")
+          EOF
+          rm -rf "$TMP_DIR"
+
+      - name: Restore State from trend-state
+        if: steps.concurrency_check.outputs.run_job == 'true'
+        run: |
+          python3 restore_state.py || echo "恢复状态失败或为空，以当前仓库状态运行"
+
+      - name: Install Python Dependencies
+        if: steps.concurrency_check.outputs.run_job == 'true'
+        run: |
+          pip install pytrends requests pandas huggingface_hub
+
+      - name: Run Full Task (trend_watch.py)
+        if: steps.concurrency_check.outputs.run_job == 'true'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ENABLED: "true"
+          TREND_STATE_DEPLOY_KEY: ${{ secrets.TREND_STATE_DEPLOY_KEY }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "以 dry-run 模式执行全量任务"
+            python3 trend_watch.py --dry-run
+          else
+            python3 trend_watch.py
+          fi
+
+      - name: Deploy Dashboard to Cloudflare Pages
+        if: steps.concurrency_check.outputs.run_job == 'true' && github.event.inputs.dry_run != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            python3 dashboard/update_dashboard.py
+            npx wrangler@latest pages deploy dashboard --project-name=trend-dash --branch=main --commit-dirty=true
+          else
+            echo "未配置 CLOUDFLARE_API_TOKEN，跳过看板部署"
+          fi

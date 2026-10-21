@@ -2971,6 +2971,13 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
                 continue
             new_models.append((key, it))
 
+        # 记录 fast 任务运行完成时间戳
+        try:
+            from last_run_utils import record_last_run
+            record_last_run("fast", status="ok")
+        except Exception as e:
+            print(f"[LastRun] 记录 fast 运行时间失败: {e}", file=sys.stderr)
+
         if not new_models:
             return []
 
@@ -2989,6 +2996,13 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
                     unit_price = '见模型页'
             print(f"- 平台: {platform} | 模型: {m.get('term')} | 链接: {link} | 单价: {unit_price}")
             discovered_items.append(m)
+
+        # 同时推送到 Telegram 通道
+        try:
+            from notifier import notify_new_terms
+            notify_new_terms(discovered_items, is_fast=True)
+        except Exception as e:
+            print(f"[Notifier] fast 推送异常: {e}", file=sys.stderr)
 
         if dry_run:
             print("[dry-run] --fast 模式，不更新 seen_terms / opportunities 状态")
@@ -3288,6 +3302,36 @@ def _main_locked(dry_run: bool = False):
     print(f"追踪库路径: {tracking_path}")
     print("\n--- 结果预览 ---")
     print(json.dumps(out_items, ensure_ascii=False, indent=2))
+
+    # 记录全量任务运行完成时间戳 (同时写 dashboard/data 与 outputs)
+    try:
+        from last_run_utils import record_last_run
+        record_last_run("full", status="ok", dashboard_data_dir=os.path.join(base_dir, "dashboard", "data"), output_dir=output_dir)
+    except Exception as e:
+        print(f"[LastRun] 记录全量运行时间失败: {e}", file=sys.stderr)
+
+    # 推送 Telegram (新词发现与 Jev 告警)
+    if out_items:
+        try:
+            from notifier import notify_new_terms
+            notify_new_terms(out_items, is_fast=False)
+        except Exception as e:
+            print(f"[Notifier] 全量新词推送异常: {e}", file=sys.stderr)
+
+    if jev_warning:
+        try:
+            from notifier import notify_alert
+            notify_alert("Jev 健康告警", jev_warning)
+        except Exception as e:
+            print(f"[Notifier] Jev 告警推送异常: {e}", file=sys.stderr)
+
+    # 状态备份：全量任务结束后推送到 trend-state 私有仓库 (--fast 不备份，dry-run 不备份)
+    if not dry_run:
+        try:
+            from state_backup import backup_state
+            backup_state(base_dir=base_dir)
+        except Exception as e:
+            print(f"[State Backup] 状态备份异常(已忽略): {e}", file=sys.stderr)
 
 
 if __name__ == '__main__':
