@@ -10,9 +10,10 @@
 
 1. **GitHub breakout**：抓取创建不足 14 天、日均涨星 200+ 或总星 400+ 的新仓库，仓库名即产品/技术新词；同一 org 一次推出 ≥3 个仓库时合并为套件级候选。
 2. **HuggingFace 新模型**：只用 `sort=trendingScore` 拉候选，只保留 `created_at` 在 7 天内的模型；一个模型一条结果（term = 模型名，去组织前缀、保留版本号）。媒体生成类 pipeline（文生视频/图生视频/文生图/图生图/文生语音）+ API 可用 + 许可证未明确禁止商用 → 标记 `event_type=new_model`。
-3. **Reddit rising**：抓取 `r/all/rising` 与技术区上升帖标题，提取 2~4 词高频短语。
-4. **GSC first-impression**：各站点近 14 天第一次有展现的 query（真实搜索需求，长尾选题）。
-5. **X (Twitter)**：Nitter 实例 / 社交搜索降级抓取，失败静默跳过。
+3. **API 平台新上架模型 (fal.ai / Replicate)**：抓取 fal.ai 和 Replicate 最近 7 天新上架的视频、图片、语音模型，上架即标记 `api_available=true` 与 `event_type=new_model`，优先抢 48 小时积分付费站窗口。每轮最多 5 条，请求失败静默跳过。
+4. **Reddit rising**：抓取 `r/all/rising` 与技术区上升帖标题，提取 2~4 词高频短语。
+5. **GSC first-impression**：各站点近 14 天第一次有展现的 query（真实搜索需求，长尾选题）。
+6. **X (Twitter)**：Nitter 实例 / 社交搜索降级抓取，失败静默跳过。
 
 Google Trends **只做验证**（14 天命中率核验），不参与发现；核验时丢弃最近 2 天未结算数据。
 
@@ -24,13 +25,15 @@ Google Trends **只做验证**（14 天命中率核验），不参与发现；�
 
 ### Jev 打分层
 
-用 TypeSafe Jev 结构化决策模型给 top 候选打三维分：`is_product_tech`（0-1）、`intent`（paid_tool / tech_term / company / media_generation / generic）、`newsworthiness`（0-1）。
+用 TypeSafe Jev 结构化决策模型给 top 候选打三维分：`is_product_tech`（0-1）、`intent`（paid_tool / tech_term / company / media_generation / generic）、`newsworthiness`（0-1，原始分除以 legend 最大键归一化，换算前原始值保存为 `newsworthiness_raw`）。
 
 - 打分前先按 `get_sort_key` 排序、再按来源分配名额（每来源至少 3 个，总数上限 `JEV_MAX_SCORE_PER_RUN=15`），避免靠后的来源整批拿不到分。
 - 上下文不只传 term：拼接来源、GitHub 仓库简介、HF 的 pipeline_tag/license、note（Reddit 原帖标题）、URL，截断 1500 字符。
-- 结果缓存进 seen_terms 条目（`jev` / `jev_scored_at` / `jev_model`）；7 天内且本轮无新证据（cooldown/repeat）时复用缓存，不重复调用。
+- **缓存仅用于记录**：打分结果存入 seen_terms 条目（`jev` / `jev_scored_at` / `jev_model`）仅作为历史追踪与审计记录。由于进入 Jev 打分阶段的候选词必须先经过 `should_notify` 筛选（具备首发、热度跃升、新来源或重大版本等新证据才通知），处于冷却期（cooldown）或无新证据的词此前已被跳过，因此常规运行不会触发 cooldown/repeat 缓存复用分支。
 - 过滤：有有效评分且 `is_product_tech < JEV_PRODUCT_TECH_THRESHOLD`（0.6）的词丢弃；未打分的词照常放行，但带 `jev_status=unscored`。每条结果都标 `jev_status`（scored / cached / unscored）。
-- 健康监控：每轮统计 `jev_stats`（provider / attempted / succeeded / failed / cached）打印在运行汇报里，并落 `outputs/jev_health.json`（最近 5 轮）；连续 2 轮 succeeded=0 时汇报明确告警「Jev 打分失效，当前过滤为全部放行」。
+- 健康监控与告警：每轮统计 `jev_stats`（含 `succeeded_by_model` 与 `fallback_count`）打印在汇报里，并落 `outputs/jev_health.json`（最近 5 轮）。
+  - 当连续 2 轮 succeeded=0 时汇报告警「Jev 打分失效，当前过滤为全部放行」。
+  - 当 `JEV_PROVIDER=openrouter` 且环境配了 `OPENROUTER_API_KEY`，但 `typesafe/jev-1.14` 为 0 且全部靠 fallback 打分时，输出一行告警：`OpenRouter 不可用（余额/key/接口），当前走免费通道`。
 
 ### 变现分流（classify_monetization）
 
@@ -69,12 +72,14 @@ python3 trend_watch.py            # 正常一轮:写输出 JSON 并更新全部�
 python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen_terms / word_tracking / GSC 基线 / jev_health 都不动)
 ```
 
-### 环境变量（Jev 配置）
+### 环境变量（Jev 与 API 平台配置）
 
 | 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
 | `JEV_PROVIDER` | `openrouter` | 打分通道：`openrouter` / `opencode_free` / `none` |
 | `OPENROUTER_API_KEY` | 无 | OpenRouter 密钥，**只从环境变量读取**，不写进代码、日志或输出 JSON（仓库 `.gitignore` 已覆盖 `.env`） |
+| `FAL_KEY` | 无 | fal.ai 密钥，**只从环境变量读取**；未配置时使用 fal.ai 公开免费搜索接口 |
+| `REPLICATE_API_TOKEN` | 无 | Replicate API 密钥，**只从环境变量读取**；未配置时静默跳过 Replicate |
 
 - `openrouter`：走 `POST https://openrouter.ai/api/alpha/decisions`，模型 `typesafe/jev-1.14`；**没有 key 或调用失败时自动回退 `opencode_free`**（OpenCode Zen 免费通道，模型 `jev-1.13-free`）；两者都失败时该条视为未打分（放行 + `jev_status=unscored`）。
 - `none`：完全不打分。
@@ -88,19 +93,19 @@ python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `term` | string | 候选新词 / 模型名 / 仓库名 |
-| `source` | string | 数据源：`github_breakout` / `huggingface` / `reddit` / `gsc_first_impression` / `x` |
-| `heat` | int | 热度数值（GitHub 为日均星数、HF 为 likes 与 downloads 综合、Reddit 为频次分、GSC 为展现数） |
+| `source` | string | 数据源：`github_breakout` / `huggingface` / `api_platform` / `reddit` / `gsc_first_impression` / `x` |
+| `heat` | int | 热度数值（GitHub 为日均星数、HF 为 likes 与 downloads 综合、API 平台为使用量/默认热度、Reddit 为频次分、GSC 为展现数） |
 | `intent` | string | 本地意图：`tool` / `info` / `other` |
 | `commercial_score` | int | 商业价值分（0-10） |
 | `event_type` | string / null | `new_model`（-1）/ `product_launch`（0）/ `policy`（1）/ `gossip`（2）/ null（3），括号内为排序优先级 |
-| `note` | string | 证据说明（仓库星数、模型 pipeline/license、原帖标题等） |
-| `source_url` | string | 来源链接 |
-| `description` | string | （GitHub）仓库简介，供 Jev 上下文与人工判断 |
-| `jev` | object / 缺省 | Jev 打分：`{is_product_tech, intent, intent_confidence, newsworthiness}`，未打分时无此字段 |
+| `note` | string | 证据说明（平台/仓库星数、单价、模型 pipeline/license、原帖标题等） |
+| `source_url` | string | 来源链接 / 模型主页 |
+| `description` | string | （GitHub/API平台）模型与仓库简介，供 Jev 上下文与人工判断 |
+| `jev` | object / 缺省 | Jev 打分：`{is_product_tech, intent, intent_confidence, newsworthiness, newsworthiness_raw}`，未打分时无此字段 |
 | `jev_status` | string | `scored` / `cached`（复用缓存）/ `unscored`（未打分） |
 | `monetization_path` | string | 变现路线：`quick_paid_site` / `tool_page` / `content` / `watch` |
 | `path_reason` | string | 路线判定理由 |
-| `hf_model_id` / `pipeline_tag` / `license` / `api_available` | | （仅 HuggingFace）模型全名、任务类型、许可证、Inference API 是否有 live provider（未知为 null） |
+| `hf_model_id` / `pipeline_tag` / `license` / `api_available` | | （HuggingFace / API平台）模型标识、任务类型、许可证、API 是否可用 |
 
 ### 输出排序规则
 
@@ -115,7 +120,7 @@ python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen
 - 每条记录：`first_seen_at` / `last_seen_at` / `seen_count` / `sources` / `project_url` / `last_heat` / `last_version`（观测字段，每轮都更新）。
 - **推送落标时机**：`last_notified_at` / `last_notified_reason` 只在「Jev 过滤 + 变现分流 + 排序完成且输出 JSON 写入成功」之后，给最终输出的词写。被过滤的词写 `last_filtered_at` / `last_filtered_reason`，**不算推送**——下一轮凭新证据仍可再提醒（旧版本曾在过滤前就误标推送、吃掉 7 天冷却期，已修复）。
 - **推送判定**（`should_notify`）：普通重复不推送；首次发现直接推送；重大版本（主版本号变化）/ 热度跃升（≥ 上次 2 倍）/ 新增独立来源证据，且距上次推送超过冷却期（`RENOTIFY_COOLDOWN_DAYS = 7` 天）时再提醒。
-- **Jev 缓存**：条目内 `jev` / `jev_scored_at` / `jev_model` 存最近一次打分结果。
+- **Jev 记录与缓存失效**：条目内 `jev` / `jev_scored_at` / `jev_model` 存最近一次打分结果（仅供记录与历史追溯）。旧版未归一化的 Jev 缓存已在加载/迁移时通过版本与 schema 校验自动失效并清除。
 - `decision`（null / build / watch / reject）与 `published_url` 由人工/上层流程回填，脚本不覆盖。
 - **迁移**：旧结构在 load 时自动迁移/补默认值，迁移前原文件备份为 `seen_terms.json.bak-<时间戳>`。
 

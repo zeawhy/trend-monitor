@@ -537,6 +537,7 @@ def get_sort_key(item: dict) -> tuple:
 RENOTIFY_COOLDOWN_DAYS = 7      # 再提醒冷却时间(天)
 HEAT_SURGE_MULTIPLIER = 2.0     # 热度跃升判定倍数
 _VERSION_RE = re.compile(r'\bv?(\d+)\.(\d+)(?:\.(\d+))?\b', re.IGNORECASE)
+JEV_CACHE_VERSION = 2           # Jev 打分 schema 版本(v2: 包含 newsworthiness_raw)
 
 
 def _empty_seen_entry(now_iso=None) -> dict:
@@ -555,18 +556,37 @@ def _empty_seen_entry(now_iso=None) -> dict:
         'jev': None,
         'jev_scored_at': None,
         'jev_model': None,
+        'jev_version': None,
         'decision': None,
         'published_url': None,
     }
 
 
+def _invalidate_legacy_jev(entry: dict):
+    """旧版 Jev 缓存失效处理:未带 newsworthiness_raw 或版本号不匹配的缓存彻底清理，绝不复用。"""
+    if not isinstance(entry, dict):
+        return
+    jev = entry.get('jev')
+    if jev is not None:
+        if (
+            entry.get('jev_version') != JEV_CACHE_VERSION
+            or not isinstance(jev, dict)
+            or 'newsworthiness_raw' not in jev
+        ):
+            entry['jev'] = None
+            entry['jev_scored_at'] = None
+            entry['jev_model'] = None
+            entry['jev_version'] = None
+
+
 def migrate_seen_entry(entry) -> dict:
-    """把 v1 结构 {first_seen, count} 迁移到 v2 状态字段;已是 v2 的只补齐缺失字段。"""
+    """把 v1 结构 {first_seen, count} 迁移到 v2 状态字段;已是 v2 的只补齐缺失字段。旧版 Jev 缓存自动失效。"""
     if not isinstance(entry, dict):
         entry = {}
     if 'first_seen_at' in entry:
         merged = _empty_seen_entry(entry.get('first_seen_at'))
         merged.update(entry)
+        _invalidate_legacy_jev(merged)
         return merged
     first = entry.get('first_seen')
     migrated = _empty_seen_entry(first)
@@ -594,12 +614,15 @@ def backup_seen_terms(path: str):
 
 
 def load_seen_terms(path: str) -> dict:
-    """加载已推送历史词库"""
+    """加载已推送历史词库(自动清理旧版未归一化的 Jev 缓存)"""
     if os.path.exists(path):
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    for v in data.values():
+                        if isinstance(v, dict):
+                            _invalidate_legacy_jev(v)
                     return data
         except Exception as e:
             print(f"[去重] 读取 seen_terms.json 失败: {e}，将初始化为空字典")
@@ -788,32 +811,36 @@ def _as_float(v):
     return float(v) if isinstance(v, (int, float)) else None
 
 
-def _normalize_score(answer: dict):
+def _normalize_score(answer: dict, default_max: float = 3.0):
     """把 Jev score 型答案归一化到 0-1。
-    Decisions API 可能返回原始刻度值(如 2.38 / legend 0..3),System One
-    通道实测返回 0-1;只对越界值(>1)按 legend 最大刻度(缺省 3)缩放,
-    0-1 内的值原样保留,与旧行为兼容。"""
+    TypeSafe score 是落在 legend 档位中的位置编号（4 档时为 0–3），必须除以最高档编号换算成 0–1。
+    不管原始数值大小，一律除以 legend 的最大键；没有 legend 时除以 len(criteria)-1（即 default_max=3.0）。"""
+    if not isinstance(answer, dict):
+        return None
     s = answer.get("score")
     if not isinstance(s, (int, float)):
         return None
     s = float(s)
-    if s > 1.0:
-        max_idx = None
-        legend = answer.get("legend")
-        if isinstance(legend, dict) and legend:
-            try:
-                max_idx = max(float(k) for k in legend.keys())
-            except Exception:
-                max_idx = None
-        if not max_idx:
-            max_idx = 3.0  # criteria 共 4 档: Low/Medium/High/Exceptional
-        if max_idx > 0:
-            s = s / max_idx
-    return max(0.0, min(1.0, s))
+    max_idx = None
+    legend = answer.get("legend")
+    if isinstance(legend, dict) and legend:
+        try:
+            max_idx = max(float(k) for k in legend.keys())
+        except Exception:
+            max_idx = None
+    if not max_idx:
+        criteria = answer.get("criteria")
+        if isinstance(criteria, (list, tuple)) and len(criteria) > 1:
+            max_idx = float(len(criteria) - 1)
+        else:
+            max_idx = default_max
+    if max_idx and max_idx > 0:
+        s = s / max_idx
+    return round(max(0.0, min(1.0, s)), 4)
 
 
 def _parse_jev_answers(data) -> dict | None:
-    """把 Jev 原始返回统一成 {is_product_tech, intent, intent_confidence, newsworthiness}。
+    """把 Jev 原始返回统一成 {is_product_tech, intent, intent_confidence, newsworthiness, newsworthiness_raw}。
     返回为空/结构不对时返回 None(视为本条未打分)。"""
     if not isinstance(data, dict):
         return None
@@ -823,11 +850,17 @@ def _parse_jev_answers(data) -> dict | None:
     is_pt = answers.get("is_product_tech") or {}
     intent = answers.get("intent") or {}
     news = answers.get("newsworthiness") or {}
+    raw_news = None
+    if isinstance(news, dict):
+        s = news.get("score")
+        if isinstance(s, (int, float)):
+            raw_news = float(s)
     return {
         "is_product_tech": _as_float(is_pt.get("noul")),
         "intent": intent.get("choice"),
         "intent_confidence": _as_float(intent.get("confidence")),
         "newsworthiness": _normalize_score(news) if isinstance(news, dict) else None,
+        "newsworthiness_raw": raw_news,
     }
 
 
@@ -861,6 +894,14 @@ def _jev_via_opencode(state: str, timeout: float = 30.0):
     return (r, JEV_MODEL) if r else (None, None)
 
 
+class ScoreResult(tuple):
+    """(jev_dict, model_used) 结果元组,保留 2-tuple 行为与解包兼容,附带 fallback 状态。"""
+    def __new__(cls, iterable, fallback=False):
+        obj = super().__new__(cls, iterable)
+        obj.fallback = fallback
+        return obj
+
+
 def score_with_jev_state(state: str, timeout: float = 30.0):
     """按 JEV_PROVIDER 走通道链给一段上下文打分,返回 (jev_dict|None, model|None)。
     openrouter 无 key 或调用失败 → 自动回退 opencode_free;都失败 → (None, None)。"""
@@ -874,14 +915,16 @@ def score_with_jev_state(state: str, timeout: float = 30.0):
                 state, timeout, "openrouter",
             )
             if r:
-                return r, JEV_OPENROUTER_MODEL
+                return ScoreResult((r, JEV_OPENROUTER_MODEL), fallback=False)
             print("[Jev] OpenRouter 通道失败,回退 opencode_free")
         else:
             print("[Jev] 未配置 OPENROUTER_API_KEY,回退 opencode_free")
-        return _jev_via_opencode(state, timeout)
+        r, m = _jev_via_opencode(state, timeout)
+        return ScoreResult((r, m), fallback=True)
     if JEV_PROVIDER != "opencode_free":
         print(f"[Jev] 未知 JEV_PROVIDER={JEV_PROVIDER},按 opencode_free 处理")
-    return _jev_via_opencode(state, timeout)
+    r, m = _jev_via_opencode(state, timeout)
+    return ScoreResult((r, m), fallback=False)
 
 
 def score_with_jev(term: str, timeout: float = 30.0) -> dict | None:
@@ -934,8 +977,13 @@ def _select_for_scoring(ordered: list, limit: int) -> list:
 
 
 def _jev_cache_fresh(entry, now: datetime) -> bool:
-    """seen 条目里的 Jev 缓存是否在有效期内。"""
+    """seen 条目里的 Jev 缓存是否在有效期内(且必须为包含 newsworthiness_raw 的新版缓存)。"""
     if not entry or not entry.get('jev') or not entry.get('jev_scored_at'):
+        return False
+    jev = entry.get('jev')
+    if not isinstance(jev, dict) or 'newsworthiness_raw' not in jev:
+        return False
+    if entry.get('jev_version') != JEV_CACHE_VERSION:
         return False
     try:
         scored_at = datetime.fromisoformat(entry['jev_scored_at'])
@@ -961,15 +1009,22 @@ def _score_one_with_jev(item: dict, seen, now: datetime, stats: dict):
         return
 
     stats['attempted'] += 1
-    jev, model_used = score_with_jev_state(build_jev_state(item))
+    res = score_with_jev_state(build_jev_state(item))
+    jev, model_used = res
+    if getattr(res, "fallback", False) or (stats.get("provider") == "openrouter" and model_used and model_used != JEV_OPENROUTER_MODEL):
+        stats['fallback_count'] = stats.get('fallback_count', 0) + 1
     if jev:
         item['jev'] = jev
         item['jev_status'] = 'scored'
         stats['succeeded'] += 1
+        if model_used:
+            stats.setdefault('succeeded_by_model', {})
+            stats['succeeded_by_model'][model_used] = stats['succeeded_by_model'].get(model_used, 0) + 1
         if entry is not None:
             entry['jev'] = jev
             entry['jev_scored_at'] = now.isoformat()
             entry['jev_model'] = model_used
+            entry['jev_version'] = JEV_CACHE_VERSION
         news = jev.get('newsworthiness')
         news_s = f"{news:.2f}" if isinstance(news, (int, float)) else "n/a"
         print(f"[Jev] {term}: intent={jev.get('intent')} news={news_s} via {model_used}")
@@ -984,7 +1039,20 @@ def enrich_with_jev(candidates: list, seen: dict = None, now: datetime = None) -
     """给候选词批量加 Jev 打分,返回本轮 jev_stats。
     先按现有规则(get_sort_key)排序再按来源分配名额;每个词单独容错。
     所有候选都会被标 jev_status: scored / cached / unscored。"""
-    stats = {'provider': JEV_PROVIDER, 'attempted': 0, 'succeeded': 0, 'failed': 0, 'cached': 0}
+    succeeded_by_model = (
+        {JEV_OPENROUTER_MODEL: 0, JEV_MODEL: 0}
+        if JEV_PROVIDER == 'openrouter'
+        else ({JEV_MODEL: 0} if JEV_PROVIDER == 'opencode_free' else {})
+    )
+    stats = {
+        'provider': JEV_PROVIDER,
+        'attempted': 0,
+        'succeeded': 0,
+        'failed': 0,
+        'cached': 0,
+        'fallback_count': 0,
+        'succeeded_by_model': succeeded_by_model,
+    }
     if now is None:
         now = datetime.now(timezone.utc)
     for item in candidates:
@@ -1004,9 +1072,26 @@ def enrich_with_jev(candidates: list, seen: dict = None, now: datetime = None) -
     return stats
 
 
+def check_openrouter_fallback_warning(stats: dict) -> str | None:
+    """当 JEV_PROVIDER=openrouter 且环境里配了 OPENROUTER_API_KEY，
+    但本轮 succeeded_by_model 里 typesafe/jev-1.14 为 0、全部靠 fallback 打分时，
+    输出一行告警：OpenRouter 不可用（余额/key/接口），当前走免费通道
+    """
+    if stats.get("provider") != "openrouter":
+        return None
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        return None
+    sbm = stats.get("succeeded_by_model") or {}
+    primary_succeeded = sbm.get(JEV_OPENROUTER_MODEL, 0)
+    total_succeeded = stats.get("succeeded", 0)
+    if primary_succeeded == 0 and total_succeeded > 0:
+        return "OpenRouter 不可用（余额/key/接口），当前走免费通道"
+    return None
+
+
 def update_jev_health(stats: dict, run_at_iso: str, output_dir: str, dry_run: bool = False):
     """维护最近 5 轮 Jev 打分统计(outputs/jev_health.json,dry-run 不落盘)。
-    连续 2 轮 attempted>0 且 succeeded=0 时返回告警文案,否则返回 None。"""
+    若触发告警则返回告警文案,否则返回 None。"""
     path = os.path.join(output_dir, 'jev_health.json')
     history = []
     if os.path.exists(path):
@@ -1018,7 +1103,7 @@ def update_jev_health(stats: dict, run_at_iso: str, output_dir: str, dry_run: bo
         except Exception:
             history = []
     current = {'run_at': run_at_iso}
-    for k in ('provider', 'attempted', 'succeeded', 'failed', 'cached'):
+    for k in ('provider', 'attempted', 'succeeded', 'failed', 'cached', 'succeeded_by_model', 'fallback_count'):
         current[k] = stats.get(k)
     recent = (history + [current])[-5:]
     if not dry_run:
@@ -1027,12 +1112,18 @@ def update_jev_health(stats: dict, run_at_iso: str, output_dir: str, dry_run: bo
                 json.dump({'history': recent}, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[Jev健康] 写入 {path} 失败: {e}")
+
+    warnings = []
+    or_warn = check_openrouter_fallback_warning(stats)
+    if or_warn:
+        warnings.append(or_warn)
+
     last_two = recent[-2:]
     if len(last_two) == 2 and all(
         (h.get('attempted') or 0) > 0 and (h.get('succeeded') or 0) == 0 for h in last_two
     ):
-        return "⚠️ [Jev健康] Jev 打分失效，当前过滤为全部放行（连续 2 轮 succeeded=0）"
-    return None
+        warnings.append("⚠️ [Jev健康] Jev 打分失效，当前过滤为全部放行（连续 2 轮 succeeded=0）")
+    return "\n".join(warnings) if warnings else None
 
 
 # ---------------------------------------------------------------------------
@@ -1683,6 +1774,214 @@ def fetch_x_trends():
 
 
 # ---------------------------------------------------------------------------
+# 数据源 6: API 平台新上架模型 (fal.ai / Replicate)
+# 抓取最近 7 天新上架的视频、图片、语音模型
+# ---------------------------------------------------------------------------
+API_PLATFORM_RECENT_DAYS = 7
+API_PLATFORM_MAX_RESULTS = 5
+API_PLATFORM_MEDIA_CATEGORIES = {
+    # 视频
+    'text-to-video', 'image-to-video', 'video-to-video',
+    # 图片
+    'text-to-image', 'image-to-image',
+    # 语音/音频
+    'text-to-speech', 'text-to-audio', 'audio-to-audio', 'speech-to-text', 'voice',
+}
+
+
+def _is_media_category(cat: str) -> bool:
+    if not cat:
+        return False
+    cat_lower = cat.lower()
+    if cat_lower in API_PLATFORM_MEDIA_CATEGORIES:
+        return True
+    return any(k in cat_lower for k in ('video', 'image', 'audio', 'speech', 'voice'))
+
+
+def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
+    """抓取 fal.ai 最近上架的媒体模型。密钥只读环境变量 FAL_KEY，绝不写死；无密钥支持公开接口。"""
+    results = []
+    fal_key = os.environ.get("FAL_KEY")
+    url = "https://api.fal.ai/v1/models?sort=recent"
+    headers = {"User-Agent": "curl/8.0"}
+    if fal_key:
+        headers["Authorization"] = f"Key {fal_key}"
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            print(f"[fal.ai] 获取模型列表失败: HTTP {resp.status_code}")
+            return results
+        data = resp.json()
+        models = data.get("models") or []
+    except Exception as e:
+        print(f"[fal.ai] 请求异常(静默跳过): {e}")
+        return results
+
+    for m in models:
+        meta = m.get("metadata") or {}
+        cat = meta.get("category") or ""
+        if not _is_media_category(cat):
+            continue
+
+        date_str = meta.get("date") or meta.get("updated_at")
+        if not date_str:
+            continue
+        try:
+            m_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if m_date < cutoff:
+            continue
+
+        endpoint_id = m.get("endpoint_id") or ""
+        display_name = meta.get("display_name") or endpoint_id.split("/")[-1]
+        if not display_name:
+            continue
+
+        model_url = f"https://fal.ai/models/{endpoint_id}"
+        desc = meta.get("description") or ""
+
+        unit_price = meta.get("unit_price") or meta.get("price")
+        price_note = f"单价: {unit_price}" if unit_price else "单价: 见模型页"
+
+        results.append({
+            "term": display_name,
+            "source": "api_platform",
+            "heat": 80,
+            "intent": "tool",
+            "commercial_score": 8,
+            "event_type": "new_model",
+            "note": f"平台: fal.ai | {price_note} | 类别: {cat} | 模型: {endpoint_id} | 链接: {model_url}",
+            "source_url": model_url,
+            "api_available": True,
+            "pipeline_tag": cat,
+            "platform": "fal.ai",
+            "description": desc,
+        })
+        if len(results) >= limit:
+            break
+
+    return results
+
+
+def _fetch_replicate_new_models(cutoff: datetime, limit: int = 5) -> list:
+    """抓取 Replicate 最近上架的媒体模型。密钥只读环境变量 REPLICATE_API_TOKEN，绝不写死；无 token 跳过。"""
+    results = []
+    token = os.environ.get("REPLICATE_API_TOKEN")
+    if not token:
+        return results
+
+    url = "https://api.replicate.com/v1/models"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "curl/8.0",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            print(f"[Replicate] 获取模型列表失败: HTTP {resp.status_code}")
+            return results
+        data = resp.json()
+        models = data.get("results") or []
+    except Exception as e:
+        print(f"[Replicate] 请求异常(静默跳过): {e}")
+        return results
+
+    for m in models:
+        name = m.get("name") or ""
+        owner = m.get("owner") or ""
+        desc = m.get("description") or ""
+        url_link = m.get("url") or f"https://replicate.com/{owner}/{name}"
+
+        text_check = f"{name} {desc}".lower()
+        if not any(k in text_check for k in ('video', 'image', 'audio', 'speech', 'voice', 'diffusion')):
+            continue
+
+        latest_version = m.get("latest_version") or {}
+        created_str = latest_version.get("created_at") or m.get("created_at")
+        if created_str:
+            try:
+                m_date = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                if m_date < cutoff:
+                    continue
+            except Exception:
+                pass
+
+        run_count = m.get("run_count") or 0
+        heat = max(run_count // 100, 10)
+        display_name = name.replace("-", " ").title()
+
+        results.append({
+            "term": display_name,
+            "source": "api_platform",
+            "heat": heat,
+            "intent": "tool",
+            "commercial_score": 8,
+            "event_type": "new_model",
+            "note": f"平台: Replicate | 单价: 见模型页 | 模型: {owner}/{name} | 链接: {url_link}",
+            "source_url": url_link,
+            "api_available": True,
+            "pipeline_tag": "media_generation",
+            "platform": "replicate",
+            "description": desc,
+        })
+        if len(results) >= limit:
+            break
+
+    return results
+
+
+def fetch_api_platform_new_models(seen: dict = None, limit: int = API_PLATFORM_MAX_RESULTS) -> list:
+    """抓取 fal.ai 和 Replicate 最近 7 天新上架的视频、图片、语音模型。
+    上架即视为 api_available=true, event_type=new_model;
+    请求失败静默跳过不阻塞;
+    若传入 seen 则自动结合 seen 去重;
+    每轮最多输出 limit (缺省 5) 条。
+    """
+    results = []
+    print("[API平台] 开始抓取 fal.ai / Replicate 新模型...")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=API_PLATFORM_RECENT_DAYS)
+
+    # 1. fal.ai
+    try:
+        fal_models = _fetch_fal_new_models(cutoff, limit=limit)
+        results.extend(fal_models)
+    except Exception as e:
+        print(f"[API平台] fal.ai 抓取失败(静默跳过): {e}")
+
+    # 2. Replicate (若结果未满 limit 且配置了 token)
+    if len(results) < limit:
+        try:
+            rem = limit - len(results)
+            rep_models = _fetch_replicate_new_models(cutoff, limit=rem)
+            results.extend(rep_models)
+        except Exception as e:
+            print(f"[API平台] Replicate 抓取失败(静默跳过): {e}")
+
+    candidates = []
+    for it in results:
+        term = it.get('term', '')
+        valid, reason = check_candidate(term, it.get('note', ''))
+        if not valid:
+            continue
+        if seen is not None:
+            url = it.get('source_url', '')
+            key = resolve_seen_key(term, url, seen)
+            entry = seen.get(key)
+            now_utc = datetime.now(timezone.utc)
+            notify, _ = should_notify(it, entry, now_utc)
+            if not notify:
+                continue
+        candidates.append(it)
+        if len(candidates) >= limit:
+            break
+
+    print(f"[API平台] 抓取完成，产出 {len(candidates)} 个合格新模型")
+    return candidates
+
+
+# ---------------------------------------------------------------------------
 # 命中率追踪机制 (Hit Rate Tracking)
 # ---------------------------------------------------------------------------
 def load_tracking_data(path: str) -> list:
@@ -2013,45 +2312,6 @@ def main(dry_run: bool = False):
     print("=== 开始运行搜索新词监控 (trend_watch.py) ===")
     if dry_run:
         print("[dry-run] 本轮只写输出 JSON,不更新 seen_terms / word_tracking 等任何状态")
-    all_candidates = []
-
-    # 发现源优先级：GitHub breakout > HuggingFace > Reddit 技术区 > GSC 首次展现 > X（失败静默跳过）
-    # Google Trends 已降为纯验证源（14 天命中率核验），不再参与发现
-
-    # 1. GitHub breakout 仓库 (新增信号源)
-    try:
-        gh_results = fetch_github_breakout()
-        all_candidates.extend(gh_results)
-    except Exception as e:
-        print(f"[GitHub] 处理发生未知异常: {e}")
-
-    # 2. HuggingFace 趋势模型
-    try:
-        hf_results = fetch_huggingface_trending()
-        all_candidates.extend(hf_results)
-    except Exception as e:
-        print(f"[HuggingFace] 处理发生未知异常: {e}")
-
-    # 3. Reddit rising
-    try:
-        reddit_results = fetch_reddit_rising()
-        all_candidates.extend(reddit_results)
-    except Exception as e:
-        print(f"[Reddit] 处理发生未知异常: {e}")
-
-    # 4. X 趋势 (失败静默跳过)
-    try:
-        x_results = fetch_x_trends()
-        all_candidates.extend(x_results)
-    except Exception as e:
-        print(f"[X] 处理发生未知异常: {e}")
-
-    # 5. GSC 首次有展现的新 query（真实用户搜索，长尾页选题）
-    try:
-        gsc_results = fetch_gsc_new_queries(update_baseline=not dry_run)
-        all_candidates.extend(gsc_results)
-    except Exception as e:
-        print(f"[GSC] 处理发生未知异常: {e}")
 
     # 确定输出文件路径（按北京时间 UTC+8 命名：YYYY-MM-DD-HH.json）
     beijing_tz = timezone(timedelta(hours=8))
@@ -2072,9 +2332,58 @@ def main(dry_run: bool = False):
         isinstance(v, dict) and 'last_filtered_at' not in v for v in seen.values()
     )
     if needs_migration:
-        backup_seen_terms(seen_path)
+        if not dry_run:
+            backup_seen_terms(seen_path)
+            print(f"[状态库] seen_terms.json 已迁移到 v2 状态结构(共 {len(seen)} 条,旧文件已备份)")
         seen = {k: migrate_seen_entry(v) for k, v in seen.items()}
-        print(f"[状态库] seen_terms.json 已迁移到 v2 状态结构(共 {len(seen)} 条,旧文件已备份)")
+
+    all_candidates = []
+
+    # 发现源优先级：GitHub breakout > HuggingFace > API 平台(fal/Replicate) > Reddit 技术区 > GSC 首次展现 > X（失败静默跳过）
+    # Google Trends 已降为纯验证源（14 天命中率核验），不再参与发现
+
+    # 1. GitHub breakout 仓库 (新增信号源)
+    try:
+        gh_results = fetch_github_breakout()
+        all_candidates.extend(gh_results)
+    except Exception as e:
+        print(f"[GitHub] 处理发生未知异常: {e}")
+
+    # 2. HuggingFace 趋势模型
+    try:
+        hf_results = fetch_huggingface_trending()
+        all_candidates.extend(hf_results)
+    except Exception as e:
+        print(f"[HuggingFace] 处理发生未知异常: {e}")
+
+    # 3. API 平台新上架模型 (fal.ai / Replicate)
+    try:
+        api_results = fetch_api_platform_new_models(seen=seen)
+        all_candidates.extend(api_results)
+    except Exception as e:
+        print(f"[API平台] 处理发生未知异常: {e}")
+
+    # 4. Reddit rising
+    try:
+        reddit_results = fetch_reddit_rising()
+        all_candidates.extend(reddit_results)
+    except Exception as e:
+        print(f"[Reddit] 处理发生未知异常: {e}")
+
+    # 5. X 趋势 (失败静默跳过)
+    try:
+        x_results = fetch_x_trends()
+        all_candidates.extend(x_results)
+    except Exception as e:
+        print(f"[X] 处理发生未知异常: {e}")
+
+    # 6. GSC 首次有展现的新 query（真实用户搜索，长尾页选题）
+    try:
+        gsc_results = fetch_gsc_new_queries(update_baseline=not dry_run)
+        all_candidates.extend(gsc_results)
+    except Exception as e:
+        print(f"[GSC] 处理发生未知异常: {e}")
+
     output_candidates = []
 
     for item in all_candidates:
@@ -2188,7 +2497,8 @@ def main(dry_run: bool = False):
 
     # Jev 健康监控:打印本轮打分统计,连续 2 轮打分全失败时明确告警
     print(f"[Jev统计] provider={jev_stats.get('provider')} attempted={jev_stats.get('attempted')} "
-          f"succeeded={jev_stats.get('succeeded')} failed={jev_stats.get('failed')} cached={jev_stats.get('cached')}")
+          f"succeeded={jev_stats.get('succeeded')} failed={jev_stats.get('failed')} cached={jev_stats.get('cached')} "
+          f"fallback_count={jev_stats.get('fallback_count', 0)} succeeded_by_model={jev_stats.get('succeeded_by_model')}")
     jev_warning = update_jev_health(jev_stats, now_bj_iso, output_dir, dry_run=dry_run)
     if jev_warning:
         print(jev_warning)
