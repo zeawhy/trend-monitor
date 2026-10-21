@@ -728,6 +728,30 @@ def get_org_recent_pushed_repos(seen: dict, org: str, days: int = GITHUB_ORG_SUI
                     except Exception:
                         pass
 
+    # 3. 兼容扫描历史 outputs/github_breakout_state.json（历史 breakout 记录）
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    gh_state_path = os.path.join(base_dir, 'outputs', 'github_breakout_state.json')
+    if os.path.exists(gh_state_path):
+        try:
+            with open(gh_state_path, 'r', encoding='utf-8') as f:
+                gh_state = json.load(f)
+            if isinstance(gh_state, dict):
+                for full_name, s_info in gh_state.items():
+                    if full_name not in seen_repos and '/' in full_name:
+                        parts = full_name.split('/')
+                        if parts[0].lower() == org_lower:
+                            ts = s_info.get('ts') if isinstance(s_info, dict) else None
+                            if ts:
+                                try:
+                                    p_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                                    if p_dt >= cutoff:
+                                        pushed.append({'repo': full_name, 'pushed_at': ts})
+                                        seen_repos.add(full_name)
+                                except Exception:
+                                    pass
+        except Exception:
+            pass
+
     return pushed
 
 
@@ -2423,7 +2447,8 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
         term = c.get('term', '').strip()
         source = c.get('source', '')
         key = (term.lower(), source)
-        heat = parse_heat(c.get('heat', 0))
+        raw_heat = c.get('heat')
+        heat = parse_heat(raw_heat) if raw_heat is not None else None
         url = c.get('source_url', '')
         if key not in existing:
             item = {
@@ -2447,7 +2472,7 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
             if not item.get("heat_history"):
                 item["heat_history"] = [{
                     "date": (item.get("discovered_at") or timestamp_iso)[:10],
-                    "heat": item.get("initial_heat", 0),
+                    "heat": item.get("initial_heat"),
                 }]
             hist = item["heat_history"]
             if not hist or hist[-1].get("date") != day:
@@ -2886,6 +2911,8 @@ def main(dry_run: bool = False):
             if pub_str:
                 try:
                     pub_dt = datetime.fromisoformat(str(pub_str).replace('Z', '+00:00'))
+                    if pub_dt.tzinfo is None:
+                        pub_dt = pub_dt.replace(tzinfo=timezone.utc)
                     c['hours_since_release'] = round((now_bj - pub_dt).total_seconds() / 3600.0, 1)
                 except Exception:
                     c['hours_since_release'] = None

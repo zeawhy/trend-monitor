@@ -33,6 +33,16 @@ class TestRecordDiscoveredTerms(unittest.TestCase):
             data = json.load(open(p, encoding="utf-8"))
             self.assertEqual(data[0]["monetization_path"], "quick_paid_site")
 
+    def test_records_heat_none_when_heat_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "word_tracking.json")
+            cands = [{"term": "api_model", "source": "api_platform", "heat": None,
+                      "source_url": "https://fal.ai/models/x", "monetization_path": "quick_paid_site"}]
+            tw.record_discovered_terms(cands, p, OLD)
+            data = json.load(open(p, encoding="utf-8"))
+            self.assertIsNone(data[0]["initial_heat"])
+            self.assertEqual(data[0]["heat_history"], [{"date": OLD[:10], "heat": None}])
+
 
 class TestHitRateByPath(unittest.TestCase):
     def test_grouping_and_quick_paid_standard(self):
