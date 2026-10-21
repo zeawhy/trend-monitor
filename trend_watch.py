@@ -41,6 +41,7 @@ import requests
 import pandas as pd
 from pytrends.request import TrendReq
 from huggingface_hub import HfApi
+from lock_utils import ConcurrencyLock
 
 # ---------------------------------------------------------------------------
 # Monkey-patch pytrends TrendReq 以适应 Google Trends 最新的 API 变动
@@ -2334,8 +2335,154 @@ def _fetch_replicate_new_models(cutoff: datetime, limit: int = 5) -> list:
     return results
 
 
+def _fetch_openrouter_new_models(cutoff: datetime, limit: int = 5) -> list:
+    """抓取 OpenRouter 最近上架的模型列表。公开接口无需 key；失败静默跳过。"""
+    results = []
+    url = "https://openrouter.ai/api/v1/models"
+    headers = {"User-Agent": "curl/8.0"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            print(f"[OpenRouter] 获取模型列表失败: HTTP {resp.status_code}")
+            return results
+        data = resp.json()
+        models = data.get("data") or []
+    except Exception as e:
+        print(f"[OpenRouter] 请求异常(静默跳过): {e}")
+        return results
+
+    cutoff_ts = cutoff.timestamp()
+    for m in models:
+        created = m.get("created")
+        if not created or created < cutoff_ts:
+            continue
+
+        model_id = m.get("id") or ""
+        display_name = m.get("name") or model_id.split("/")[-1]
+        desc = m.get("description") or ""
+        model_url = f"https://openrouter.ai/{model_id}"
+        pricing = m.get("pricing") or {}
+        p_prompt = pricing.get("prompt")
+        p_compl = pricing.get("completion")
+
+        if p_prompt == "0" and p_compl == "0":
+            unit_price = "免费"
+        elif p_prompt is not None and p_compl is not None:
+            try:
+                prompt_m = float(p_prompt) * 1e6
+                compl_m = float(p_compl) * 1e6
+                unit_price = f"${prompt_m:.2f}/${compl_m:.2f} per 1M tokens"
+            except Exception:
+                unit_price = f"prompt: {p_prompt}, completion: {p_compl}"
+        else:
+            unit_price = "见模型页"
+
+        price_note = f"单价: {unit_price}"
+        architecture = m.get("architecture") or {}
+        modality = architecture.get("modality") or "multimodal"
+
+        results.append({
+            "term": display_name,
+            "source": "api_platform",
+            "heat": 85,
+            "intent": "tool",
+            "commercial_score": 8,
+            "event_type": "new_model",
+            "note": f"平台: OpenRouter | {price_note} | 模态: {modality} | 模型: {model_id} | 链接: {model_url}",
+            "source_url": model_url,
+            "api_available": True,
+            "pipeline_tag": modality,
+            "platform": "openrouter",
+            "description": desc,
+            "unit_price": unit_price,
+        })
+        if len(results) >= limit:
+            break
+
+    return results
+
+
+def _fetch_bfl_new_models(cutoff: datetime, limit: int = 5) -> list:
+    """抓取 Black Forest Labs (BFL) 官方博客/公告新发布的模型与工具。"""
+    results = []
+    headers = {"User-Agent": "curl/8.0"}
+    html = ""
+    for try_url in ["https://blackforestlabs.ai/blog/", "https://bfl.ai/blog/"]:
+        try:
+            resp = requests.get(try_url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                html = resp.text
+                break
+        except Exception as e:
+            print(f"[BFL] 请求 {try_url} 异常: {e}")
+
+    if not html:
+        return results
+
+    posts = re.findall(
+        r'<a[^>]+aria-label=[\"\']Read blog post:\s*([^\"\']+)[\"\'][^>]+href=[\"\'](/blog/[^\"\'#]+)[\"\'](.*?)</a>',
+        html,
+        re.DOTALL,
+    )
+    if not posts:
+        all_links = re.findall(r'href=[\"\'](/blog/[^\"\'#]+)[\"\'][^>]*>(.*?)</a>', html, re.DOTALL)
+        posts = [("", h, inner) for h, inner in all_links]
+
+    seen_slugs = set()
+    for raw_title, href, inner in posts:
+        slug = href.split('/')[-1]
+        if slug in seen_slugs or not slug:
+            continue
+        seen_slugs.add(slug)
+
+        clean_inner = re.sub(r'<[^>]+>', ' ', inner)
+        clean_inner = re.sub(r'\s+', ' ', clean_inner).strip()
+
+        date_m = re.search(
+            r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})',
+            clean_inner,
+        )
+        if date_m:
+            try:
+                post_date = datetime.strptime(date_m.group(0), "%B %d, %Y").replace(tzinfo=timezone.utc)
+                if post_date < cutoff:
+                    continue
+            except Exception:
+                pass
+
+        title = raw_title.strip() if raw_title else ""
+        if not title:
+            t = clean_inner
+            for prefix in ("Models News Research", "Models Research", "Products Models", "Research Models", "News Research", "Customer stories", "News", "Products"):
+                if t.startswith(prefix):
+                    t = t[len(prefix):].strip()
+            t = re.sub(r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}.*$', '', t).strip()
+            title = t or slug.replace('-', ' ').title()
+
+        article_url = f"https://bfl.ai{href}"
+        results.append({
+            "term": title,
+            "source": "api_platform",
+            "heat": 90,
+            "intent": "tool",
+            "commercial_score": 9,
+            "event_type": "new_model",
+            "note": f"平台: BFL | 单价: 见模型页 | 类别: image/video | 模型: {title} | 链接: {article_url}",
+            "source_url": article_url,
+            "api_available": True,
+            "pipeline_tag": "image-generation",
+            "platform": "bfl",
+            "description": clean_inner[:200],
+            "unit_price": "见模型页",
+        })
+        if len(results) >= limit:
+            break
+
+    return results
+
+
 def fetch_api_platform_new_models(seen: dict = None, limit: int = API_PLATFORM_MAX_RESULTS) -> list:
-    """抓取 fal.ai 和 Replicate 最近 7 天新上架的视频、图片、语音模型。
+    """抓取 fal.ai、Replicate、OpenRouter 和 BFL 最近 7 天新上架的视频、图片、语音及多模态模型。
     上架即视为 api_available=true, event_type=new_model;
     请求失败静默跳过不阻塞;
     若传入 seen 则自动结合 seen 去重;
@@ -2360,6 +2507,24 @@ def fetch_api_platform_new_models(seen: dict = None, limit: int = API_PLATFORM_M
             results.extend(rep_models)
         except Exception as e:
             print(f"[API平台] Replicate 抓取失败(静默跳过): {e}")
+
+    # 3. OpenRouter (若结果未满 limit)
+    if len(results) < limit:
+        try:
+            rem = limit - len(results)
+            or_models = _fetch_openrouter_new_models(cutoff, limit=rem)
+            results.extend(or_models)
+        except Exception as e:
+            print(f"[API平台] OpenRouter 抓取失败(静默跳过): {e}")
+
+    # 4. BFL (若结果未满 limit)
+    if len(results) < limit:
+        try:
+            rem = limit - len(results)
+            bfl_models = _fetch_bfl_new_models(cutoff, limit=rem)
+            results.extend(bfl_models)
+        except Exception as e:
+            print(f"[API平台] BFL 抓取失败(静默跳过): {e}")
 
     candidates = []
     for it in results:
@@ -2746,9 +2911,129 @@ def _write_hit_rate_report(output_dir: str, report: dict):
 
 
 # ---------------------------------------------------------------------------
+# 高频官方模型平台检查 (--fast)
+# ---------------------------------------------------------------------------
+def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, output_dir: str = None) -> list:
+    """高频官方模型平台检查 (--fast):
+    只检查官方模型平台新上架: fal, Replicate, OpenRouter 模型列表, BFL 博客/公告;
+    只做 diff + seen_terms 去重，不调 Jev、不跑全流程;
+    加并发锁(文件锁)，避免和 6 小时全量任务冲突;
+    发现新模型立即把结果打印到 stdout(写清平台、模型页链接、单价)，由 cron 调用方决定是否推送。
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if output_dir is None:
+        output_dir = os.path.join(base_dir, "outputs")
+    seen_path = os.path.join(output_dir, "seen_terms.json")
+
+    with ConcurrencyLock():
+        seen = load_seen_terms(seen_path)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=API_PLATFORM_RECENT_DAYS)
+
+        all_models = []
+        # 1. fal.ai
+        try:
+            all_models.extend(_fetch_fal_new_models(cutoff, limit=limit))
+        except Exception as e:
+            print(f"[API平台] fal.ai 抓取失败(静默跳过): {e}", file=sys.stderr)
+
+        # 2. Replicate
+        try:
+            all_models.extend(_fetch_replicate_new_models(cutoff, limit=limit))
+        except Exception as e:
+            print(f"[API平台] Replicate 抓取失败(静默跳过): {e}", file=sys.stderr)
+
+        # 3. OpenRouter
+        try:
+            all_models.extend(_fetch_openrouter_new_models(cutoff, limit=limit))
+        except Exception as e:
+            print(f"[API平台] OpenRouter 抓取失败(静默跳过): {e}", file=sys.stderr)
+
+        # 4. BFL
+        try:
+            all_models.extend(_fetch_bfl_new_models(cutoff, limit=limit))
+        except Exception as e:
+            print(f"[API平台] BFL 抓取失败(静默跳过): {e}", file=sys.stderr)
+
+        now_utc = datetime.now(timezone.utc)
+        now_bj_iso = (now_utc + timedelta(hours=8)).isoformat()
+        new_models = []
+
+        for it in all_models:
+            term = it.get('term', '')
+            valid, _ = check_candidate(term, it.get('note', ''))
+            if not valid:
+                continue
+            url = it.get('source_url', '')
+            key = resolve_seen_key(term, url, seen)
+            entry = seen.get(key)
+            notify, _ = should_notify(it, entry, now_utc)
+            if not notify:
+                continue
+            new_models.append((key, it))
+
+        if not new_models:
+            return []
+
+        # 发现新模型立即把结果打印到 stdout (写清平台、模型页链接、单价)
+        print(f"=== [Fast新模型监控] 发现 {len(new_models)} 个官方新模型 ===")
+        discovered_items = []
+        for key, m in new_models:
+            platform = m.get('platform') or '官方平台'
+            link = m.get('source_url') or '见模型页'
+            unit_price = m.get('unit_price')
+            if not unit_price:
+                note = m.get('note', '')
+                if '单价:' in note:
+                    unit_price = note.split('单价:')[1].split('|')[0].strip()
+                else:
+                    unit_price = '见模型页'
+            print(f"- 平台: {platform} | 模型: {m.get('term')} | 链接: {link} | 单价: {unit_price}")
+            discovered_items.append(m)
+
+        if dry_run:
+            print("[dry-run] --fast 模式，不更新 seen_terms / opportunities 状态")
+            return discovered_items
+
+        # 更新 seen_terms.json
+        for key, m in new_models:
+            entry = seen.get(key)
+            if entry is None:
+                entry = _empty_seen_entry(now_bj_iso)
+                seen[key] = entry
+            entry['last_seen_at'] = now_bj_iso
+            entry['seen_count'] = (entry.get('seen_count') or 0) + 1
+            src = m.get('source')
+            if src and src not in (entry.get('sources') or []):
+                entry.setdefault('sources', []).append(src)
+            url = m.get('source_url')
+            if url and not entry.get('project_url'):
+                entry['project_url'] = url
+            entry['last_heat'] = parse_heat(m.get('heat', 80))
+            entry['last_notified_at'] = now_bj_iso
+            entry['last_notified_reason'] = 'fast_official_model'
+
+        save_seen_terms(seen_path, seen)
+
+        # 写入 opportunities.json
+        try:
+            from opps import record_opportunities
+            opps_file = os.path.join(output_dir, "opportunities.json")
+            record_opportunities(discovered_items, path=opps_file)
+        except Exception as e:
+            print(f"[Fast] 写入 opportunities 异常: {e}", file=sys.stderr)
+
+        return discovered_items
+
+
+# ---------------------------------------------------------------------------
 # 主流程与文件输出
 # ---------------------------------------------------------------------------
 def main(dry_run: bool = False):
+    with ConcurrencyLock():
+        _main_locked(dry_run=dry_run)
+
+
+def _main_locked(dry_run: bool = False):
     print("=== 开始运行搜索新词监控 (trend_watch.py) ===")
     if dry_run:
         print("[dry-run] 本轮只写输出 JSON,不更新 seen_terms / word_tracking 等任何状态")
@@ -2957,6 +3242,14 @@ def main(dry_run: bool = False):
         # 命中率追踪：记录新发现候选词至 hidden_files/word_tracking.json
         record_discovered_terms(out_items, tracking_path, now_bj_iso)
 
+        # 机会看板：记录新发现候选词至 outputs/opportunities.json (status=new)
+        try:
+            from opps import record_opportunities
+            opps_file = os.path.join(output_dir, "opportunities.json")
+            record_opportunities(out_items, path=opps_file)
+        except Exception as e:
+            print(f"[机会看板] 记录新候选词异常: {e}")
+
         # 命中率核验：核验 14 天前的候选词并生成报告至 outputs/
         try:
             check_hit_rate(tracking_path=tracking_path, output_dir=output_dir)
@@ -3000,10 +3293,33 @@ def main(dry_run: bool = False):
 if __name__ == '__main__':
     import argparse
 
+    if len(sys.argv) > 1 and sys.argv[1] == 'opps':
+        from opps import main as opps_main
+        opps_main(sys.argv[2:])
+        sys.exit(0)
+
     _ap = argparse.ArgumentParser(description="搜索新词监控")
     _ap.add_argument(
         "--dry-run",
         action="store_true",
         help="只写输出 JSON,不更新 seen_terms / word_tracking / GSC 基线等任何状态",
     )
-    main(dry_run=_ap.parse_args().dry_run)
+    _ap.add_argument(
+        "--fast",
+        action="store_true",
+        help="高频官方模型平台检查 (fal, Replicate, OpenRouter, BFL)，仅做去重并输出新模型",
+    )
+    _ap.add_argument(
+        "--digest",
+        action="store_true",
+        help="每日机会与复盘日报",
+    )
+    _args = _ap.parse_args()
+
+    if _args.digest:
+        from digest import run_digest
+        run_digest(dry_run=_args.dry_run)
+    elif _args.fast:
+        run_fast(dry_run=_args.dry_run)
+    else:
+        main(dry_run=_args.dry_run)

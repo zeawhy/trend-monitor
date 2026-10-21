@@ -43,9 +43,17 @@
   .sbar { width: 9px; background: #f0a35e; border-radius: 2px; min-height: 2px; }
   .src-link { color: #5ea3f0; font-size: 12px; text-decoration: none; }
   .src-link:hover { text-decoration: underline; }
+  .nav-bar { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid #232b3d; padding-bottom: 10px; }
+  .nav-tab { color: #8b93a7; text-decoration: none; padding: 6px 14px; border-radius: 6px; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+  .nav-tab:hover { color: #e8ecf4; background: #1a2133; }
+  .nav-tab.active { color: #fff; background: #2a3350; font-weight: 600; }
 </style>
 </head>
 <body>
+<div class="nav-bar">
+  <a class="nav-tab active" href="index.html">📊 监控首页</a>
+  <a class="nav-tab" href="opportunities.html">🎯 机会看板</a>
+</div>
 <h1>🎯 新词监控控制台</h1>
 <div class="sub" id="updated">加载中…</div>
 

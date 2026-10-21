@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>机会看板 - 新词监控控制台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1420; color: #e8ecf4; padding: 16px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #8b93a7; font-size: 13px; margin-bottom: 16px; }
+  .nav-bar { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid #232b3d; padding-bottom: 10px; }
+  .nav-tab { color: #8b93a7; text-decoration: none; padding: 6px 14px; border-radius: 6px; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+  .nav-tab:hover { color: #e8ecf4; background: #1a2133; }
+  .nav-tab.active { color: #fff; background: #2a3350; font-weight: 600; }
+
+  .stat-row { display: flex; gap: 12px; margin-bottom: 16px; }
+  .stat { flex: 1; background: #1a2133; border-radius: 10px; padding: 12px; text-align: center; border: 1px solid #232b3d; }
+  .stat .n { font-size: 22px; font-weight: 700; }
+  .stat .t { font-size: 12px; color: #8b93a7; margin-top: 4px; }
+
+  .filter-panel { background: #1a2133; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; border: 1px solid #232b3d; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  .view-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .v-btn { background: #232b3d; color: #aeb8d0; border: none; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+  .v-btn:hover { background: #2e3850; color: #fff; }
+  .v-btn.active { background: #5ea3f0; color: #fff; font-weight: 600; }
+
+  .status-filter { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #aeb8d0; }
+  select { background: #141a2a; color: #e8ecf4; border: 1px solid #2e3850; padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+
+  .card { background: #1a2133; border-radius: 10px; padding: 14px; margin-bottom: 16px; border: 1px solid #232b3d; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 800px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #232b3d; vertical-align: top; }
+  th { color: #8b93a7; font-weight: 500; white-space: nowrap; }
+  tr:hover { background: #1f273d; }
+
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 500; white-space: nowrap; }
+  .st-new { background: #1d3557; color: #a8dadc; }
+  .st-evaluating { background: #2b1f3d; color: #c45ef0; }
+  .st-decided { background: #1f3d2b; color: #5ef0a3; }
+  .st-building { background: #3d2b1f; color: #f0a35e; }
+  .st-live { background: #14532d; color: #4ade80; }
+  .st-review { background: #78350f; color: #fde047; }
+  .st-dropped { background: #2b2f3d; color: #8b93a7; }
+
+  .rt-quick { color: #f0a35e; }
+  .rt-tool { color: #c45ef0; }
+  .rt-wiki { color: #5ea3f0; }
+  .rt-ignore { color: #8b93a7; }
+
+  .src-link { color: #5ea3f0; text-decoration: none; word-break: break-all; }
+  .src-link:hover { text-decoration: underline; }
+  .notes { color: #8b93a7; font-size: 12px; margin-top: 4px; max-width: 260px; line-height: 1.4; }
+  .overdue-tag { color: #f05e5e; font-size: 11px; font-weight: 600; margin-left: 4px; }
+  .loading { text-align: center; padding: 40px; color: #8b93a7; }
+</style>
+</head>
+<body>
+
+<div class="nav-bar">
+  <a class="nav-tab" href="index.html">📊 监控首页</a>
+  <a class="nav-tab active" href="opportunities.html">🎯 机会看板</a>
+</div>
+
+<h1>🎯 机会看板 (Opportunities)</h1>
+<div class="sub">改状态走 CLI (`python3 opps.py set <term> ...`)，看板只读 · 数据每轮自动同步</div>
+
+<div class="stat-row" id="statsRow">
+  <div class="stat"><div class="n" id="stTotal">-</div><div class="t">总机会数</div></div>
+  <div class="stat"><div class="n" id="stPending">-</div><div class="t">待决定</div></div>
+  <div class="stat"><div class="n" id="stOverdue" style="color: #f05e5e;">-</div><div class="t">>48h未处理</div></div>
+  <div class="stat"><div class="n" id="stLive">-</div><div class="t">已上线 / 待复盘</div></div>
+</div>
+
+<div class="filter-panel">
+  <div class="view-buttons">
+    <button class="v-btn active" data-view="all">全部 (All)</button>
+    <button class="v-btn" data-view="pending">待决定 (Pending)</button>
+    <button class="v-btn" data-view="overdue">⚠️ 超过48小时未处理</button>
+    <button class="v-btn" data-view="review">已上线待复盘 (Review)</button>
+  </div>
+  <div class="status-filter">
+    <label for="statusSelect">按状态筛选:</label>
+    <select id="statusSelect">
+      <option value="all">全部状态</option>
+      <option value="new">new (新发现)</option>
+      <option value="evaluating">evaluating (评估中)</option>
+      <option value="decided">decided (已决定)</option>
+      <option value="building">building (构建中)</option>
+      <option value="live">live (已上线)</option>
+      <option value="review">review (待复盘)</option>
+      <option value="dropped">dropped (已放弃)</option>
+    </select>
+  </div>
+</div>
+
+<div class="card">
+  <table id="oppsTable">
+    <thead>
+      <tr>
+        <th>词 (term)</th>
+        <th>状态</th>
+        <th>建议路线</th>
+        <th>商业分/热度</th>
+        <th>来源</th>
+        <th>发现时间</th>
+        <th>决策 / 结局</th>
+        <th>上线链接</th>
+        <th>截止/复盘日</th>
+        <th>备注 / 原因</th>
+      </tr>
+    </thead>
+    <tbody id="oppsBody">
+      <tr><td colspan="10" class="loading">加载中…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+let allOpps = [];
+let currentView = 'all';
+let currentStatus = 'all';
+
+async function loadData() {
+  try {
+    const res = await fetch('data/opportunities.json');
+    allOpps = await res.json();
+    if (!Array.isArray(allOpps)) allOpps = [];
+    renderStats();
+    renderTable();
+  } catch (e) {
+    document.getElementById('oppsBody').innerHTML = `<tr><td colspan="10" class="loading">加载失败: ${e.message}</td></tr>`;
+  }
+}
+
+function parseDate(s) {
+  if (!s) return null;
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
+}
+
+function renderStats() {
+  const now = new Date();
+  let pending = 0;
+  let overdue = 0;
+  let liveReview = 0;
+
+  allOpps.forEach(o => {
+    const isPending = (o.status === 'new' || o.status === 'evaluating') && !o.decision;
+    if (isPending) {
+      pending++;
+      const dt = parseDate(o.discovered_at);
+      if (dt && (now - dt) > 48 * 3600 * 1000) overdue++;
+    }
+    if (o.status === 'live' || o.status === 'review') liveReview++;
+  });
+
+  document.getElementById('stTotal').textContent = allOpps.length;
+  document.getElementById('stPending').textContent = pending;
+  document.getElementById('stOverdue').textContent = overdue;
+  document.getElementById('stLive').textContent = liveReview;
+}
+
+function getFilteredData() {
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+
+  return allOpps.filter(o => {
+    // 1. Built-in view filter
+    if (currentView === 'pending') {
+      if (!((o.status === 'new' || o.status === 'evaluating') && !o.decision)) return false;
+    } else if (currentView === 'overdue') {
+      const isPending = (o.status === 'new' || o.status === 'evaluating') && !o.decision;
+      if (!isPending) return false;
+      const dt = parseDate(o.discovered_at);
+      if (!dt || (now - dt) <= 48 * 3600 * 1000) return false;
+    } else if (currentView === 'review') {
+      const isReview = o.status === 'review' || (o.status === 'live' && o.deadline && o.deadline.slice(0, 10) <= todayStr);
+      if (!isReview) return false;
+    }
+
+    // 2. Status dropdown filter
+    if (currentStatus !== 'all') {
+      if ((o.status || '').toLowerCase() !== currentStatus) return false;
+    }
+
+    return true;
+  });
+}
+
+function routeClass(r) {
+  if (r === 'quick_paid_site') return 'rt-quick';
+  if (r === 'box_tool') return 'rt-tool';
+  if (r === 'wiki_article') return 'rt-wiki';
+  return 'rt-ignore';
+}
+
+function renderTable() {
+  const list = getFilteredData();
+  const tbody = document.getElementById('oppsBody');
+  const now = new Date();
+
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:30px; color:#8b93a7;">没有符合条件的机会记录</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = list.map(o => {
+    const st = o.status || 'new';
+    const discDt = parseDate(o.discovered_at);
+    const isOverdue = (st === 'new' || st === 'evaluating') && !o.decision && discDt && (now - discDt) > 48 * 3600 * 1000;
+    const discStr = o.discovered_at ? o.discovered_at.slice(0, 10) : '-';
+    const deadStr = o.deadline ? o.deadline.slice(0, 10) : '-';
+    const pageLink = o.page_url ? `<a class="src-link" href="${o.page_url}" target="_blank" rel="noopener">链接 ↗</a>` : '<span style="color:#8b93a7">—</span>';
+
+    const decOut = [o.decision ? `决策: ${o.decision}` : '', o.outcome ? `结局: ${o.outcome}` : ''].filter(Boolean).join('<br>') || '<span style="color:#8b93a7">—</span>';
+    const notesText = [o.notes, o.drop_reason ? `放弃: ${o.drop_reason}` : ''].filter(Boolean).join('；');
+
+    return `<tr>
+      <td><strong>${o.term}</strong>${isOverdue ? '<span class="overdue-tag">⚠️>48h</span>' : ''}</td>
+      <td><span class="badge st-${st}">${st}</span></td>
+      <td><span class="${routeClass(o.suggested_route)}">${o.suggested_route || 'ignore'}</span></td>
+      <td>${o.score != null ? o.score : '-'}</td>
+      <td>${o.source || 'unknown'}</td>
+      <td>${discStr}</td>
+      <td>${decOut}</td>
+      <td>${pageLink}</td>
+      <td>${deadStr}</td>
+      <td><div class="notes">${notesText || '—'}</div></td>
+    </tr>`;
+  }).join('');
+}
+
+// Event Listeners
+document.querySelectorAll('.v-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.v-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentView = btn.dataset.view;
+    renderTable();
+  });
+});
+
+document.getElementById('statusSelect').addEventListener('change', (e) => {
+  currentStatus = e.target.value;
+  renderTable();
+});
+
+loadData();
+</script>
+</body>
+</html>
