@@ -8,9 +8,9 @@
 
 ### 发现源（按优先级）
 
-1. **GitHub breakout**：抓取创建不足 14 天、日均涨星 200+ 或总星 400+ 的新仓库，仓库名即产品/技术新词；同一 org 一次推出 ≥3 个仓库时合并为套件级候选。
-2. **HuggingFace 新模型**：只用 `sort=trendingScore` 拉候选，只保留 `created_at` 在 7 天内的模型；一个模型一条结果（term = 模型名，去组织前缀、保留版本号）。媒体生成类 pipeline（文生视频/图生视频/文生图/图生图/文生语音）+ API 可用 + 许可证未明确禁止商用 → 标记 `event_type=new_model`。
-3. **API 平台新上架模型 (fal.ai / Replicate)**：抓取 fal.ai 和 Replicate 最近 7 天新上架的视频、图片、语音模型，上架即标记 `api_available=true` 与 `event_type=new_model`，优先抢 48 小时积分付费站窗口。每轮最多 5 条，请求失败静默跳过。
+1. **GitHub breakout**：抓取创建不足 14 天、日均涨星 200+ 或总星 400+ 的新仓库，仓库名即产品/技术新词；同一 org 一次推出或近 30 天已推送 ≥3 个仓库时合并为套件级候选，更新成员列表与热度，注明"同组织系列，疑似批量发布"。
+2. **HuggingFace 新模型**：只用 `sort=trendingScore` 拉候选，只保留 `created_at` 在 7 天内的模型。对模型名做标准化剥离日期与格式后缀（`-dev`/`-comfy`/`-gguf`/`-fp8` 等），同一组织同族模型合并为一个条目（新增 `variants` 字段）；标准化后若为已知产品或在历史状态库中超过 7 天，标 `event_type=version_update` 并默认走 `watch` 观察；Comfy-Org 等转载账号优先从模型卡解析 `base_model` 去重。媒体生成类 pipeline + API 可用 + 许可证未禁商用 → 标记 `event_type=new_model`。
+3. **API 平台新上架模型 (fal.ai / Replicate)**：抓取 fal.ai 和 Replicate 最近 7 天新上架的视频、图片、语音模型，先按模型族路径归组合并（例如 `blackforestlabs/flux-3-max` 去除端点名），term 输出模型族名并带 `variants` 各端点详情，优先抢 48 小时积分付费站窗口。拿不到真实热度时 `heat` 设为 `null`，带 `heat_source="none"`。每轮最多 5 条，请求失败静默跳过。
 4. **Reddit rising**：抓取 `r/all/rising` 与技术区上升帖标题，提取 2~4 词高频短语。
 5. **GSC first-impression**：各站点近 14 天第一次有展现的 query（真实搜索需求，长尾选题）。
 6. **X (Twitter)**：Nitter 实例 / 社交搜索降级抓取，失败静默跳过。
@@ -41,13 +41,14 @@ Jev 打分之后、排序之前，每个候选必须落到一条路线，结果�
 
 | 顺序 | 条件 | 路线 | 后续动作 |
 | :--- | :--- | :--- | :--- |
-| 1 | `event_type=new_model` 且 `api_available` | `quick_paid_site` | 抢 48 小时窗口：积分制付费站 |
+| 0 | `event_type=version_update`（老产品版本更新/量化/衍生格式） | `watch` | 默认先观察 |
+| 1 | `event_type=new_model` 或媒体生成模型，且 `api_available` | `quick_paid_site` | 抢 48 小时窗口：积分制付费站 |
 | 2 | `intent=tool`，或 Jev intent ∈ {paid_tool, media_generation} | `tool_page` | 并入 yuliusbox 工具页 |
 | 3 | `intent=info`，或 Jev intent = tech_term | `content` | 写 yuliuswiki 文章 |
 | 4 | Jev intent = generic 且 newsworthiness < 0.4 | `reject` | 不输出，记入 last_filtered_reason |
 | 5 | 其余 | `watch` | 先观察 |
 
-汇报里 quick_paid_site 单独列在最前，带模型类型、api_available、license。
+汇报与看板里 quick_paid_site 单独列在最前，额外给出平台单价（拿不到标 null 且提示需人工确认）、许可证/服务条款链接、发布时间与距今小时数（判断 48 小时窗口）、Google 竞品检查链接（`<模型名> free online`）。
 
 ### 自动化输出
 
@@ -92,25 +93,32 @@ python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen
 
 | 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `term` | string | 候选新词 / 模型名 / 仓库名 |
+| `term` | string | 候选新词 / 模型族名 / 仓库名 |
 | `source` | string | 数据源：`github_breakout` / `huggingface` / `api_platform` / `reddit` / `gsc_first_impression` / `x` |
-| `heat` | int | 热度数值（GitHub 为日均星数、HF 为 likes 与 downloads 综合、API 平台为使用量/默认热度、Reddit 为频次分、GSC 为展现数） |
+| `heat` | int / null | 热度数值（GitHub 为日均星数、HF 为 likes 与 downloads 综合、API 平台为使用量，拿不到真实热度时为 `null` 且看板显示"—"） |
+| `heat_source` | string | 热度计算来源：`huggingface` / `stars_per_day` / `reddit_score` / `x_posts` / `gsc_impressions` / `run_count` / `none` |
 | `intent` | string | 本地意图：`tool` / `info` / `other` |
 | `commercial_score` | int | 商业价值分（0-10） |
-| `event_type` | string / null | `new_model`（-1）/ `product_launch`（0）/ `policy`（1）/ `gossip`（2）/ null（3），括号内为排序优先级 |
+| `event_type` | string / null | `new_model`（-1）/ `product_launch`（0）/ `version_update`（1）/ `policy`（2）/ `gossip`（3）/ null（4），括号内为排序优先级 |
 | `note` | string | 证据说明（平台/仓库星数、单价、模型 pipeline/license、原帖标题等） |
 | `source_url` | string | 来源链接 / 模型主页 |
 | `description` | string | （GitHub/API平台）模型与仓库简介，供 Jev 上下文与人工判断 |
+| `variants` | array | （API平台 / HF）同一模型族的各端点/变体列表（包含 endpoint/name, category, url 等） |
 | `jev` | object / 缺省 | Jev 打分：`{is_product_tech, intent, intent_confidence, newsworthiness, newsworthiness_raw}`，未打分时无此字段 |
 | `jev_status` | string | `scored` / `cached`（复用缓存）/ `unscored`（未打分） |
 | `monetization_path` | string | 变现路线：`quick_paid_site` / `tool_page` / `content` / `watch` |
 | `path_reason` | string | 路线判定理由 |
+| `unit_price` | string / null | （quick_paid_site）平台单价，无法获取时为 `null`（提示需人工确认） |
+| `license_url` | string | （quick_paid_site）许可证 / 服务条款链接 |
+| `published_at` | string | （quick_paid_site）模型平台上架时间（ISO格式） |
+| `hours_since_release` | float / null | （quick_paid_site）距平台上架已过小时数（判断是否在 48 小时窗口内） |
+| `competitor_search_url` | string | （quick_paid_site）Google 竞品搜索链接（`<模型名> free online`） |
 | `hf_model_id` / `pipeline_tag` / `license` / `api_available` | | （HuggingFace / API平台）模型标识、任务类型、许可证、API 是否可用 |
 
 ### 输出排序规则
 
 1. **变现路线优先级**：`quick_paid_site` (0) > `tool_page` (1) > `content` (2) > `watch` (3)。
-2. 路线内按 `get_sort_key`：`event_type` 优先级升序 → `commercial_score` 降序 → `heat` 降序。
+2. 路线内按 `get_sort_key`：热度有效性（`heat=null` 排在同路线最后，不参与与其他来源比较）→ `event_type` 优先级升序 → `commercial_score` 降序 → `heat` 降序。
 
 ---
 
@@ -129,6 +137,7 @@ python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen
 ## 6. 命中率追踪（按路线区分）
 
 - **追踪库**：`hidden_files/word_tracking.json`，记录每个输出词的 `monetization_path`、发现时热度与热度历史。
+- **历史数据标记 (legacy)**：Google Trends 降为纯验证源前写入的 `google_trends` 条目及旧版短语提取产生的 HF 泛词（如 "image 2.1"、"2.1 comfyui"）标记为 `legacy=true`。原始数据予以保留，命中率核验（`check_hit_rate`）和控制台看板「14 天追踪中」默认排除 legacy 条目；控制台提供「显示旧数据」开关供随时查阅。
 - 14 天后核验（`check_hit_rate`），报告落 `outputs/hit_rate_report.json` / `.md`：
   - `content` / `tool_page`：沿用「14 天 Trends 热度翻倍」标准。
   - `quick_paid_site`：**不用 Trends 判定**，报告里标注「以 page_tracking 第 7 天净收入为准」，不自动标记核验。
