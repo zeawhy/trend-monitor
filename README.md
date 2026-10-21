@@ -10,7 +10,7 @@
 
 1. **GitHub breakout**：抓取创建不足 14 天、日均涨星 200+ 或总星 400+ 的新仓库，仓库名即产品/技术新词；同一 org 一次推出或近 30 天已推送 ≥3 个仓库时合并为套件级候选，更新成员列表与热度，注明"同组织系列，疑似批量发布"。
 2. **HuggingFace 新模型**：只用 `sort=trendingScore` 拉候选，只保留 `created_at` 在 7 天内的模型。对模型名做标准化剥离日期与格式后缀（`-dev`/`-comfy`/`-gguf`/`-fp8` 等），同一组织同族模型合并为一个条目（新增 `variants` 字段）；标准化后若为已知产品或在历史状态库中超过 7 天，标 `event_type=version_update` 并默认走 `watch` 观察；Comfy-Org 等转载账号优先从模型卡解析 `base_model` 去重。媒体生成类 pipeline + API 可用 + 许可证未禁商用 → 标记 `event_type=new_model`。
-3. **API 平台新上架模型 (fal.ai / Replicate)**：抓取 fal.ai 和 Replicate 最近 7 天新上架的视频、图片、语音模型，先按模型族路径归组合并（例如 `blackforestlabs/flux-3-max` 去除端点名），term 输出模型族名并带 `variants` 各端点详情，优先抢 48 小时积分付费站窗口。拿不到真实热度时 `heat` 设为 `null`，带 `heat_source="none"`。每轮最多 5 条，请求失败静默跳过。
+3. **API 平台与官方模型发布 (fal.ai / Replicate / OpenRouter / BFL)**：抓取 fal.ai、Replicate、OpenRouter 模型列表、Black Forest Labs (BFL) 官方博客/公告最近 7 天新上架的视频、图片、语音模型，先按模型族路径归组合并（例如 `blackforestlabs/flux-3-max` 去除端点名），term 输出模型族名并带 `variants` 各端点详情，优先抢 48 小时积分付费站窗口。拿不到真实热度时 `heat` 设为 `null`，带 `heat_source="none"`。每轮最多 5 条，单个来源失败静默跳过并记日志。
 4. **Reddit rising**：抓取 `r/all/rising` 与技术区上升帖标题，提取 2~4 词高频短语。
 5. **GSC first-impression**：各站点近 14 天第一次有展现的 query（真实搜索需求，长尾选题）。
 6. **X (Twitter)**：Nitter 实例 / 社交搜索降级抓取，失败静默跳过。
@@ -69,9 +69,15 @@ pip install pytrends requests pandas huggingface_hub
 ## 3. 运行方式
 
 ```bash
-python3 trend_watch.py            # 正常一轮:写输出 JSON 并更新全部状态
-python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen_terms / word_tracking / GSC 基线 / jev_health 都不动)
+python3 trend_watch.py            # 全量运行(每 6 小时): 抓取全部发现源、Jev 打分、变现分流、写输出与更新状态
+python3 trend_watch.py --dry-run  # 全量 dry-run: 只写输出 JSON, 不更新任何状态文件
+python3 trend_watch.py --fast     # 高频检查(每 30 分钟): 只查官方平台(fal/Replicate/OpenRouter/BFL), 仅 diff+去重, 发现新模型立即打 stdout
+python3 trend_watch.py --fast --dry-run  # fast dry-run: 发现新模型打印 stdout, 但不写 seen_terms / opportunities
+python3 trend_watch.py --digest   # 每日日报(每天 9:00): 昨日新机会 Top5、待决定数、>48h未处理清单、今日复盘页面、路线命中率(无内容静默退出)
 ```
+
+> [!NOTE]
+> 脚本内置跨进程**并发锁**（文件锁 `hidden_files/.trend_watch.lock`），自动避免 `--fast` 高频任务与 6 小时全量任务或 CLI 命令同时写状态文件。
 
 ### 环境变量（Jev 与 API 平台配置）
 
@@ -168,23 +174,102 @@ python3 trend_watch.py --dry-run  # 只写输出 JSON,不更新任何状态(seen
 
 ---
 
-## 8. 定时运行建议
+## 8. 机会看板与状态管理 (opportunities.json & opps.py)
 
-通过定时任务每 6 小时运行一轮（cron 频率不在本仓库代码内，由调度方配置，本次升级未改动）。
+- **状态文件**：`outputs/opportunities.json`（JSON 数组），统一承接所有来源新发现的机会词，支持变现路线、人工决策、上线状态与止损复盘全生命周期跟踪。
+- **字段表**：
+
+| 字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `term` | string | 候选词 / 模型名 / 项目名 |
+| `source` | string | 发现来源 (`api_platform` / `huggingface` / `github_breakout` / `reddit` / `gsc_first_impression` / `x`) |
+| `discovered_at` | string | 首次发现时间（ISO 8601，北京时间） |
+| `score` | number | 商业价值分或热度分 |
+| `suggested_route`| string | 建议路线：`wiki_article` / `box_tool` / `quick_paid_site` / `ignore` |
+| `decision` | string/null | 决策：`build` / `watch` / `drop` 等 |
+| `status` | string | 状态流转：`new` → `evaluating` → `decided` → `building` → `live` → `review` → `dropped` |
+| `outcome` | string/null | 结局：`running` / `merged` / `killed` |
+| `page_url` | string | 已上线页面 URL（与 page_tracking 关联） |
+| `deadline` | string/null | 决策截止日（默认发现后 48 小时）或上线后复盘截止日（kill_by） |
+| `notes` | string | 备注 / 证据补充 |
+| `drop_reason` | string/null | 放弃原因 |
+| `updated_at` | string | 最后更新时间（ISO 8601） |
+
+- **自动写入与关联**：
+  - 全量运行与 `--fast` 高频运行发现的新词，自动录入 `outputs/opportunities.json`（`status=new`，48小时决策 deadline）。
+  - 已上线的词与 `hidden_files/page_tracking.json` 关联：`page_url` 或 `term` 对上时，自动同步 `status`（`live` / `review`）、`outcome`（`running` / `merged` / `killed`）与 `deadline`（`kill_by`）。
+- **命令行工具 (CLI)**：
+  ```bash
+  # 1. 查看机会看板与筛选
+  python3 opps.py list                                      # 查看全部
+  python3 opps.py list --status new,evaluating              # 按状态筛选
+  python3 opps.py list --view pending                       # 内置视图: 待决定
+  python3 opps.py list --view overdue                       # 内置视图: 超过 48 小时未处理
+  python3 opps.py list --view review                        # 内置视图: 已上线待复盘
+
+  # 2. 修改机会状态
+  python3 opps.py set "wan2-tool" --decision build --status building --note "开始立项制作积分站"
+  python3 opps.py set "wan2-tool" --url "https://yuliusbox.com/wan2"  # 上线自动设 status=live, outcome=running
+  python3 opps.py set "solidcraft" --drop-reason "竞品过多且热度下降"    # 自动标记 status=dropped
+
+  # 3. 与 page_tracking 同步
+  python3 opps.py sync
+
+  # 也支持作为 trend_watch.py 子命令调用:
+  python3 trend_watch.py opps list --view pending
+  ```
+- **Web 控制台机会看板 (trend-dash.pages.dev/opportunities.html)**：
+  - 表格按状态筛选，内置视图一键切换：`待决定`、`超过48小时未处理`、`已上线待复盘`。
+  - 看板**只读**，修改状态走 CLI，控制台通过 `dashboard/deploy_dashboard.py` 自动化部署发布。
 
 ---
 
-## 9. 测试
+## 9. 每日机会与复盘日报 (--digest)
+
+- **命令**：
+  ```bash
+  python3 trend_watch.py --digest
+  # 或独立执行:
+  python3 digest.py
+  ```
+- **日报内容**：
+  1. 昨日新机会（Top 5，按商业分/热度降序）
+  2. 待决定概况（当前待决定数量、超过 48 小时未处理清单）
+  3. 今日到复盘日（kill_by）的页面清单与处置建议
+  4. 各变现路线命中率（quick_paid_site / tool_page / content / legacy）
+- **静默规则**：若昨日无新机会且无待决定、无超时未处理、无今日复盘页面，**输出为空并静默退出**，避免推送空日报干扰。
+
+---
+
+## 10. 定时任务配置建议 (Crontab)
+
+> [!IMPORTANT]
+> 定时任务由调度方配置，代码库不擅自修改系统 crontab。以下为建议的 crontab 配置行：
+
+```cron
+# 1. 高频官方模型平台检查 (--fast 每 30 分钟一次，仅 diff+去重，有新模型时打印 stdout 可管道转发推送)
+*/30 * * * * cd ~/workspace/trend-monitor && python3 trend_watch.py --fast >> ~/workspace/trend-monitor/logs/cron_fast.log 2>&1
+
+# 2. 全量发现、Jev 打分与变现分流 (保持每 6 小时一次)
+0 */6 * * * cd ~/workspace/trend-monitor && python3 trend_watch.py >> ~/workspace/trend-monitor/logs/cron.log 2>&1
+
+# 3. 每日机会与复盘日报 (每天早 9:00 Asia/Shanghai 运行，无内容时静默退出不推送)
+0 9 * * * cd ~/workspace/trend-monitor && python3 trend_watch.py --digest >> ~/workspace/trend-monitor/logs/cron_digest.log 2>&1
+```
+
+---
+
+## 11. 测试
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
-覆盖：推送状态延后写入（第 1 项 bug 回归）、Jev 解析/通道回退/名额分配/缓存/健康告警、HuggingFace 新模型规则、变现分流每条规则、page_tracking 迁移与 pnl、命中率路线分组、seen/page 旧结构迁移。
+覆盖：推送状态延后写入、Jev 解析/通道回退/名额分配/缓存/健康告警、HuggingFace 新模型规则、变现分流每条规则、page_tracking 迁移与 pnl、命中率路线分组、seen/page 旧结构迁移、跨进程并发文件锁、官方模型平台抓取与 `--fast` 去重输出、`opportunities.json` 结构迁移与状态流转同步、`--digest` 内容生成与空内容静默退出。
 
 ---
 
-## 10. 已知限制
+## 12. 已知限制
 
 1. **人名过滤为启发式规则**：极生僻外国名且标题无职务关键词时可能有边缘误差。
 2. **Google Trends 频率限制**：命中率核验内置 1.2 秒节流；Trends 返回空时该词计未命中。
