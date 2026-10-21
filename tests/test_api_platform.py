@@ -180,6 +180,94 @@ class TestApiPlatformNewModels(unittest.TestCase):
             # 跳过了 Model 0 和 Model 1，首个应为 Model 2
             self.assertEqual(res_dedup[0]["term"], "Media Model 2")
 
+    def test_fal_merges_flux3_and_fibo_variants(self):
+        # 真实样本测试: FLUX 3 Max 的 3 个变体和 Fibo 2.0 的 2 个变体合并为 1 条
+        cutoff = NOW_UTC - timedelta(days=7)
+        mock_data = {
+            "models": [
+                {
+                    "endpoint_id": "blackforestlabs/flux-3-max/text-to-video",
+                    "metadata": {
+                        "display_name": "FLUX 3 Max Text to Video",
+                        "category": "text-to-video",
+                        "date": NOW_UTC.isoformat(),
+                        "description": "fal's FLUX 3 Max text-to-video variant",
+                    }
+                },
+                {
+                    "endpoint_id": "blackforestlabs/flux-3-max/keyframes-to-video",
+                    "metadata": {
+                        "display_name": "FLUX 3 Max Keyframes to Video",
+                        "category": "image-to-video",
+                        "date": NOW_UTC.isoformat(),
+                        "description": "fal's FLUX 3 Max keyframes variant",
+                    }
+                },
+                {
+                    "endpoint_id": "blackforestlabs/flux-3-max/image-to-video",
+                    "metadata": {
+                        "display_name": "FLUX 3 Max Image to Video",
+                        "category": "image-to-video",
+                        "date": NOW_UTC.isoformat(),
+                        "description": "fal's FLUX 3 Max image-to-video variant",
+                    }
+                },
+                {
+                    "endpoint_id": "bria/fibo-2/generate",
+                    "metadata": {
+                        "display_name": "Fibo 2.0 Generate",
+                        "category": "text-to-image",
+                        "date": NOW_UTC.isoformat(),
+                        "description": "Fibo 2.0 Generate text-to-image",
+                    }
+                },
+                {
+                    "endpoint_id": "bria/fibo-2/edit",
+                    "metadata": {
+                        "display_name": "Fibo 2.0 Edit",
+                        "category": "image-to-image",
+                        "date": NOW_UTC.isoformat(),
+                        "description": "Fibo 2.0 Edit instruction-based edits",
+                    }
+                },
+            ]
+        }
+        mock_resp = mock.Mock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = mock_data
+
+        with mock.patch("requests.get", return_value=mock_resp):
+            res = tw._fetch_fal_new_models(cutoff, limit=5)
+
+        self.assertEqual(len(res), 2)
+        flux = next(it for it in res if "FLUX 3 Max" in it["term"])
+        self.assertEqual(flux["term"], "FLUX 3 Max")
+        self.assertEqual(flux["source_url"], "https://fal.ai/models/blackforestlabs/flux-3-max")
+        self.assertEqual(len(flux["variants"]), 3)
+        self.assertEqual(
+            [v["endpoint"] for v in flux["variants"]],
+            [
+                "blackforestlabs/flux-3-max/text-to-video",
+                "blackforestlabs/flux-3-max/keyframes-to-video",
+                "blackforestlabs/flux-3-max/image-to-video",
+            ]
+        )
+
+        fibo = next(it for it in res if "Fibo 2.0" in it["term"])
+        self.assertEqual(fibo["term"], "Fibo 2.0")
+        self.assertEqual(fibo["source_url"], "https://fal.ai/models/bria/fibo-2")
+        self.assertEqual(len(fibo["variants"]), 2)
+        self.assertEqual(
+            [v["endpoint"] for v in fibo["variants"]],
+            ["bria/fibo-2/generate", "bria/fibo-2/edit"]
+        )
+
+        # 验证 seen_terms 的 key 用模型族名，避免后续变体重复推送
+        seen = {}
+        key = tw.resolve_seen_key(flux["term"], flux["source_url"], seen)
+        self.assertEqual(key, "flux 3 max")
+
+
 
 if __name__ == "__main__":
     unittest.main()

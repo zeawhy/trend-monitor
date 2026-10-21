@@ -110,6 +110,26 @@ class TestFetchHuggingFace(unittest.TestCase):
         r = self._run(models)
         self.assertEqual(len(r), 5)
 
+    def test_hf_merges_variants(self):
+        # 变体合并测试: 同一组织下只差后缀的模型合并
+        models = [
+            fake_model("black-forest-labs/FLUX.1-dev", created_days_ago=1, pipeline_tag="text-to-image", license_="apache-2.0", ipm=live_mapping(), likes=50),
+            fake_model("black-forest-labs/FLUX.1-schnell", created_days_ago=1, pipeline_tag="text-to-image", license_="apache-2.0", ipm=live_mapping(), likes=80),
+        ]
+        r = self._run(models)
+        self.assertEqual(len(r), 1)
+        item = r[0]
+        self.assertEqual(item["term"], "FLUX.1")
+        self.assertEqual(len(item["variants"]), 2)
+        self.assertEqual(item["heat"], 80)
+        self.assertTrue(item["api_available"])
+        self.assertIn("含 2 个变体", item["note"])
+
+        # seen_terms key 为模型族名
+        seen = {}
+        key = tw.resolve_seen_key(item["term"], item["source_url"], seen)
+        self.assertEqual(key, "flux.1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -638,7 +638,9 @@ def save_seen_terms(path: str, data: dict):
 
 def resolve_seen_key(term: str, project_url: str, seen: dict) -> str:
     """同名词条的 key:同一产品按 project_url 对齐;同名但项目地址不同的产品
-    拆成 base、base#2、base#3…,不再只靠小写词粗暴合并。"""
+    拆成 base、base#2、base#3…,不再只靠小写词粗暴合并。
+    对模型族名,若历史上以某个端点名/变体名记录过(如 'flux 3 max text to video'),
+    自动继承历史记录,避免新变体造成重复推送。"""
     base = term.strip().lower()
     if not project_url:
         return base
@@ -647,10 +649,23 @@ def resolve_seen_key(term: str, project_url: str, seen: dict) -> str:
         key = base if n == 1 else f"{base}#{n}"
         entry = seen.get(key)
         if entry is None:
-            return key
+            break
         if (entry.get('project_url') or '') == project_url:
             return key
         n += 1
+
+    # 检查 seen_terms 是否已有同模型族的端点历史记录（向前兼容历史数据）
+    for old_k, old_entry in seen.items():
+        if not isinstance(old_entry, dict) or old_k.startswith('_'):
+            continue
+        old_url = old_entry.get('project_url') or ''
+        if (old_url and project_url and (old_url.startswith(project_url) or project_url.startswith(old_url))) or \
+           old_k.startswith(base + ' '):
+            seen[base] = dict(old_entry)
+            seen[base]['project_url'] = project_url
+            return base
+
+    return base if n == 1 else f"{base}#{n}"
 
 
 def extract_version(text: str):
@@ -1372,10 +1387,13 @@ def fetch_huggingface_trending():
     recent = [m for m in models if getattr(m, 'created_at', None) and m.created_at >= cutoff]
     print(f"[HuggingFace] trendingScore 候选 {len(models)} 个,其中 created_at 在 {HF_RECENT_DAYS} 天内的 {len(recent)} 个")
 
+    families = {}
     for m in recent:
-        model_name = (m.id or '').split('/')[-1]
+        model_id = m.id or ''
+        model_name = model_id.split('/')[-1]
         if not model_name:
             continue
+        org = model_id.split('/')[0] if '/' in model_id else ''
         pipeline_tag = getattr(m, 'pipeline_tag', None)
         license_str = _hf_model_license(m)
 
@@ -1389,16 +1407,62 @@ def fetch_huggingface_trending():
             api_available = None
 
         heat = max(m.likes or 0, (m.downloads or 0) // 100, 1)
-        context = f"huggingface model {m.id} pipeline:{pipeline_tag or ''} license:{license_str or ''}"
 
-        valid, reason = check_candidate(model_name, context)
-        if not valid:
-            print(f"[HuggingFace] 过滤掉{reason}: {model_name}")
-            continue
+        # 变体归组：同一组织下名字只差后缀（-dev / -comfy / -gguf / -fp8 等）的模型合并
+        family_name = normalize_model_name(model_name) or model_name
+        group_key = (org.lower(), family_name.lower())
 
-        intent = classify_intent(model_name, context)
-        commercial_score = score_commercial(model_name, context, intent=intent)
-        event_type = classify_event_type(model_name, context)
+        variant_item = {
+            "model_id": model_id,
+            "name": model_name,
+            "category": pipeline_tag,
+            "url": f"https://huggingface.co/{model_id}",
+            "license": license_str,
+            "api_available": api_available,
+            "heat": heat,
+            "created_at": getattr(m, 'created_at', None),
+        }
+
+        if group_key not in families:
+            context = f"huggingface model {model_id} pipeline:{pipeline_tag or ''} license:{license_str or ''}"
+            valid, reason = check_candidate(family_name, context)
+            if not valid:
+                print(f"[HuggingFace] 过滤掉{reason}: {family_name}")
+                continue
+
+            families[group_key] = {
+                "org": org,
+                "family_name": family_name,
+                "primary_model_id": model_id,
+                "source_url": f"https://huggingface.co/{model_id}",
+                "pipeline_tag": pipeline_tag,
+                "license": license_str,
+                "api_available": api_available,
+                "heat": heat,
+                "variants": [variant_item],
+                "context": context,
+            }
+        else:
+            fam = families[group_key]
+            fam["variants"].append(variant_item)
+            if fam["api_available"] is not True and api_available is True:
+                fam["api_available"] = True
+            elif fam["api_available"] is None and api_available is not None:
+                fam["api_available"] = api_available
+            if heat > fam["heat"]:
+                fam["heat"] = heat
+
+    for group_key, fam in families.items():
+        family_name = fam["family_name"]
+        context = fam["context"]
+        intent = classify_intent(family_name, context)
+        commercial_score = score_commercial(family_name, context, intent=intent)
+        event_type = classify_event_type(family_name, context)
+
+        api_available = fam["api_available"]
+        pipeline_tag = fam["pipeline_tag"]
+        license_str = fam["license"]
+
         if (
             pipeline_tag in HF_MEDIA_PIPELINE_TAGS
             and api_available
@@ -1406,19 +1470,22 @@ def fetch_huggingface_trending():
         ):
             event_type = 'new_model'
 
+        var_count = len(fam["variants"])
+        note_var = f"(含 {var_count} 个变体)" if var_count > 1 else ""
         results.append({
-            "term": model_name,
+            "term": family_name,
             "source": "huggingface",
-            "heat": heat,
+            "heat": fam["heat"],
             "intent": intent,
             "commercial_score": commercial_score,
             "event_type": event_type,
-            "note": f"HuggingFace 近{HF_RECENT_DAYS}天新模型 {m.id}(pipeline_tag={pipeline_tag}, license={license_str}, api_available={api_available})",
-            "source_url": f"https://huggingface.co/{m.id}",
-            "hf_model_id": m.id,
+            "note": f"HuggingFace 近{HF_RECENT_DAYS}天新模型 {fam['primary_model_id']}{note_var}(pipeline_tag={pipeline_tag}, license={license_str}, api_available={api_available})",
+            "source_url": fam["source_url"],
+            "hf_model_id": fam["primary_model_id"],
             "pipeline_tag": pipeline_tag,
             "license": license_str,
             "api_available": api_available,
+            "variants": fam["variants"],
         })
         if len(results) >= HF_MAX_RESULTS:
             break
@@ -1795,6 +1862,66 @@ API_PLATFORM_MEDIA_CATEGORIES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 模型名变体与后缀处理 (Variant & Normalization)
+# ---------------------------------------------------------------------------
+_DATE_SUFFIX_RE = re.compile(
+    r'[\-_](?:(?:19|20)\d{2})?(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?=$|[\-_])',
+    re.I
+)
+_VARIANT_SUFFIX_RE = re.compile(
+    r'[\-_](?:dev|schnell|comfy|comfyui|gguf|fp8|fp16|bf16|awq|gptq|int4|int8|int2|bnb(?:[48]bit)?|exl2|safetensors|onnx|lora|diffusers|vae|base|instruct|chat|preview)(?=$|[\-_])',
+    re.I
+)
+
+
+def normalize_model_name(name_or_id: str) -> str:
+    """对模型名做标准化：去掉组织前缀、日期后缀（-MMDD/-YYYYMMDD）、量化与格式后缀（-gguf/-fp8/-awq/-comfy 等）。"""
+    if not name_or_id:
+        return ""
+    name = name_or_id.split("/")[-1].strip()
+    prev = None
+    while prev != name:
+        prev = name
+        name = _DATE_SUFFIX_RE.sub('', name)
+        name = _VARIANT_SUFFIX_RE.sub('', name)
+        name = name.rstrip("-_ ")
+    return name
+
+
+def _extract_fal_family(endpoint_id: str, display_name: str) -> tuple[str, str]:
+    """从 fal.ai 的 endpoint_id 与 display_name 中提取 (family_path, family_name)。
+    例如:
+      endpoint_id: 'blackforestlabs/flux-3-max/text-to-video'
+      display_name: 'FLUX 3 Max Text to Video'
+      -> family_path: 'blackforestlabs/flux-3-max', family_name: 'FLUX 3 Max'
+
+      endpoint_id: 'bria/fibo-2/generate'
+      display_name: 'Fibo 2.0 Generate'
+      -> family_path: 'bria/fibo-2', family_name: 'Fibo 2.0'
+    """
+    parts = endpoint_id.strip("/").split("/")
+    if len(parts) >= 3:
+        family_path = "/".join(parts[:-1])
+        endpoint_name = parts[-1]
+    else:
+        family_path = endpoint_id.strip("/")
+        endpoint_name = parts[-1] if parts else ""
+
+    family_name = display_name
+    if endpoint_name:
+        ep_words = endpoint_name.replace("-", " ").replace("_", " ")
+        pattern = r'[\s\-_:]*(?:' + re.escape(ep_words) + r'|' + re.escape(endpoint_name) + r')[\s\-_:]*$'
+        cleaned = re.sub(pattern, '', display_name, flags=re.IGNORECASE).strip()
+        if cleaned:
+            family_name = cleaned
+        elif len(parts) >= 2:
+            family_slug = parts[-2] if len(parts) >= 3 else parts[-1]
+            family_name = family_slug.replace("-", " ").title()
+
+    return family_path, family_name
+
+
 def _is_media_category(cat: str) -> bool:
     if not cat:
         return False
@@ -1805,7 +1932,11 @@ def _is_media_category(cat: str) -> bool:
 
 
 def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
-    """抓取 fal.ai 最近上架的媒体模型。密钥只读环境变量 FAL_KEY，绝不写死；无密钥支持公开接口。"""
+    """抓取 fal.ai 最近上架的媒体模型并按模型族归组合并。
+    - 归组：按平台模型族路径 (如 blackforestlabs/flux-3-max)，去掉最后一级端点名
+    - 每组输出一条：term 用模型族名 (如 'FLUX 3 Max')，新增 variants 列出各端点/类别/链接
+    - source_url 用模型族主页
+    """
     results = []
     fal_key = os.environ.get("FAL_KEY")
     url = "https://api.fal.ai/v1/models?sort=recent"
@@ -1824,6 +1955,7 @@ def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
         print(f"[fal.ai] 请求异常(静默跳过): {e}")
         return results
 
+    families = {}
     for m in models:
         meta = m.get("metadata") or {}
         cat = meta.get("category") or ""
@@ -1847,23 +1979,63 @@ def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
 
         model_url = f"https://fal.ai/models/{endpoint_id}"
         desc = meta.get("description") or ""
-
         unit_price = meta.get("unit_price") or meta.get("price")
-        price_note = f"单价: {unit_price}" if unit_price else "单价: 见模型页"
 
+        family_path, family_name = _extract_fal_family(endpoint_id, display_name)
+        variant_item = {
+            "endpoint": endpoint_id,
+            "category": cat,
+            "url": model_url,
+            "unit_price": unit_price,
+            "date": date_str,
+        }
+
+        if family_path not in families:
+            family_url = f"https://fal.ai/models/{family_path}"
+            families[family_path] = {
+                "family_path": family_path,
+                "family_name": family_name,
+                "family_url": family_url,
+                "categories": [cat],
+                "description": desc,
+                "variants": [variant_item],
+                "latest_date": m_date,
+                "published_at": date_str,
+                "unit_prices": [unit_price] if unit_price else [],
+            }
+        else:
+            fam = families[family_path]
+            fam["variants"].append(variant_item)
+            if cat not in fam["categories"]:
+                fam["categories"].append(cat)
+            if m_date > fam["latest_date"]:
+                fam["latest_date"] = m_date
+                fam["published_at"] = date_str
+            if unit_price and unit_price not in fam["unit_prices"]:
+                fam["unit_prices"].append(unit_price)
+            if not fam["description"] and desc:
+                fam["description"] = desc
+
+    for family_path, fam in families.items():
+        price_val = fam["unit_prices"][0] if fam["unit_prices"] else None
+        price_note = f"单价: {price_val}" if price_val else "单价: 见模型页"
+        cats_str = ", ".join(fam["categories"])
         results.append({
-            "term": display_name,
+            "term": fam["family_name"],
             "source": "api_platform",
             "heat": 80,
             "intent": "tool",
             "commercial_score": 8,
             "event_type": "new_model",
-            "note": f"平台: fal.ai | {price_note} | 类别: {cat} | 模型: {endpoint_id} | 链接: {model_url}",
-            "source_url": model_url,
+            "note": f"平台: fal.ai | {price_note} | 类别: {cats_str} | 模型族: {family_path} | 变体数: {len(fam['variants'])} | 链接: {fam['family_url']}",
+            "source_url": fam["family_url"],
             "api_available": True,
-            "pipeline_tag": cat,
+            "pipeline_tag": fam["categories"][0] if fam["categories"] else "media_generation",
             "platform": "fal.ai",
-            "description": desc,
+            "description": fam["description"],
+            "variants": fam["variants"],
+            "published_at": fam["published_at"],
+            "unit_price": price_val,
         })
         if len(results) >= limit:
             break
