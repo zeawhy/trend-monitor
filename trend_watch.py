@@ -1586,6 +1586,10 @@ def fetch_huggingface_trending(seen: dict = None):
         family_name = normalize_model_name(model_name) or model_name
         group_key = (org.lower(), family_name.lower())
 
+        created_at_val = getattr(m, 'created_at', None)
+        if isinstance(created_at_val, datetime):
+            created_at_val = created_at_val.isoformat()
+
         variant_item = {
             "model_id": model_id,
             "name": model_name,
@@ -1594,7 +1598,7 @@ def fetch_huggingface_trending(seen: dict = None):
             "license": license_str,
             "api_available": api_available,
             "heat": heat,
-            "created_at": getattr(m, 'created_at', None),
+            "created_at": created_at_val,
         }
 
         if group_key not in families:
@@ -2909,7 +2913,7 @@ def main(dry_run: bool = False):
     ]
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(out_items, f, ensure_ascii=False, indent=2)
+            json.dump(out_items, f, ensure_ascii=False, indent=2, default=str)
     except Exception as e:
         print(f"[输出] 写入 {output_path} 失败: {e},本轮不更新任何状态")
         return
