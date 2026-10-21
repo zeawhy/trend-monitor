@@ -1,11 +1,38 @@
 {
-  "generated_at": "2026-10-20T05:08:07.325735+08:00",
+  "generated_at": "2026-10-21T11:08:45.481237+08:00",
   "overall": {
-    "total_tracked": 37,
+    "total_tracked": 51,
     "total_evaluated": 0,
     "total_hits": 0,
     "hit_rate": "0.0%"
   },
   "sources": {},
+  "paths": {
+    "legacy": {
+      "total": 0,
+      "hits": 0,
+      "tracked": 38,
+      "hit_rate": "0.0%"
+    },
+    "tool_page": {
+      "total": 0,
+      "hits": 0,
+      "tracked": 4,
+      "hit_rate": "0.0%"
+    },
+    "content": {
+      "total": 0,
+      "hits": 0,
+      "tracked": 4,
+      "hit_rate": "0.0%"
+    },
+    "quick_paid_site": {
+      "total": 0,
+      "hits": 0,
+      "tracked": 5,
+      "hit_rate": null,
+      "standard": "以 page_tracking 第 7 天净收入为准"
+    }
+  },
   "evaluated_details": []
 }

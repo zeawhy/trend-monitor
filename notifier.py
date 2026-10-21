@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Telegram 推送通道模块
 
-读取环境变量:
-- TELEGRAM_BOT_TOKEN: Telegram Bot Token (未配置时静默跳过)
+读取凭据 (优先级):
+- Bot Token: 安全连接器 custom.telegram-trend-bot (surrogate, 不落盘) > 环境变量 TELEGRAM_BOT_TOKEN
 - TELEGRAM_CHAT_ID: Telegram 接收会话 ID (未配置时静默跳过)
 - TELEGRAM_ENABLED: 推送开关, 默认开启 (设为 "0" / "false" / "no" 时禁用)
 
@@ -29,12 +29,35 @@ def is_telegram_enabled() -> bool:
 
 
 def get_telegram_creds() -> Tuple[Optional[str], Optional[str]]:
-    """获取 Telegram 凭据 (token, chat_id)。若任意一个未配置则返回 (None, None)"""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    """获取 Telegram 凭据 (token, chat_id)。若任意一个未配置则返回 (None, None)。
+
+    优先级: 安全连接器 custom.telegram-trend-bot > 环境变量 TELEGRAM_BOT_TOKEN。
+    chat_id 始终从环境变量 TELEGRAM_CHAT_ID 读取。
+    """
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
+    if not chat_id:
+        return None, None
+
+    # 优先走保险库里的凭据 (surrogate 方式, 不落盘)
+    token = _get_token_from_connector()
+    if not token:
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
         return None, None
     return token, chat_id
+
+
+def _get_token_from_connector() -> Optional[str]:
+    """从安全连接器 custom.telegram-trend-bot 取 surrogate token, 失败返回 None。"""
+    try:
+        sys.path.insert(0, "/opt/muse/skills/custom-connector-setup/bin")
+        from dynamic_credentials import dynamic_credential_entry
+
+        entry = dynamic_credential_entry("custom.telegram-trend-bot", "access_token")
+        surr = str(entry["surrogate"]).strip()
+        return surr if surr.startswith("hsurr:") else None
+    except Exception:
+        return None
 
 
 def send_telegram_message(

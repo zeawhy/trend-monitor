@@ -1,1 +1,66 @@
-[]
+[
+  {
+    "term": "FLUX 3 Max Pricing",
+    "topic_url": "https://yuliuswiki.com/flux-3-max-pricing",
+    "decided_at": "2026-10-21T03:57:17.549753+00:00",
+    "decision_reason": "FLUX 3 Max 发布窗口，内容截流。提醒：① yuliusbox 视频工具上线后补内链；② 2026-11-07 之后更新定价篇的价格",
+    "effort_notes": "",
+    "index_status": "deploying",
+    "gsc": [],
+    "created_at": "2026-10-21T03:57:17.549753+00:00",
+    "site_type": "content",
+    "costs": [],
+    "revenue": [],
+    "kill_by": "2026-10-28",
+    "merged_into": "",
+    "outcome": "running"
+  },
+  {
+    "term": "FLUX 3 Max vs Seedance 2.5 vs MiniMax H3",
+    "topic_url": "https://yuliuswiki.com/flux-3-max-vs-seedance-minimax-h3",
+    "decided_at": "2026-10-21T03:57:17.764746+00:00",
+    "decision_reason": "FLUX 3 Max 发布窗口，内容截流。提醒：① yuliusbox 视频工具上线后补内链",
+    "effort_notes": "",
+    "index_status": "deploying",
+    "gsc": [],
+    "created_at": "2026-10-21T03:57:17.764746+00:00",
+    "site_type": "content",
+    "costs": [],
+    "revenue": [],
+    "kill_by": "2026-10-28",
+    "merged_into": "",
+    "outcome": "running"
+  },
+  {
+    "term": "FLUX 3 vs FLUX 3 Max",
+    "topic_url": "https://yuliuswiki.com/flux-3-vs-flux-3-max",
+    "decided_at": "2026-10-21T03:57:18.093745+00:00",
+    "decision_reason": "FLUX 3 Max 发布窗口，内容截流。提醒：① yuliusbox 视频工具上线后补内链",
+    "effort_notes": "",
+    "index_status": "deploying",
+    "gsc": [],
+    "created_at": "2026-10-21T03:57:18.093745+00:00",
+    "site_type": "content",
+    "costs": [],
+    "revenue": [],
+    "kill_by": "2026-10-28",
+    "merged_into": "",
+    "outcome": "running"
+  },
+  {
+    "term": "AI video generation cost calculator",
+    "topic_url": "https://www.yuliusbox.com/ai-video-cost-calculator",
+    "decided_at": "2026-10-21T04:15:03.804428+00:00",
+    "decision_reason": "FLUX 3 Max 发布窗口，工具截流",
+    "effort_notes": "2026-11-07 后更新价格",
+    "index_status": "deploying",
+    "gsc": [],
+    "created_at": "2026-10-21T04:15:03.804428+00:00",
+    "site_type": "tool_page",
+    "costs": [],
+    "revenue": [],
+    "kill_by": "2026-10-28",
+    "merged_into": "",
+    "outcome": "running"
+  }
+]
