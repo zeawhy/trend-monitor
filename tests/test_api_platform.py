@@ -262,6 +262,12 @@ class TestApiPlatformNewModels(unittest.TestCase):
             ["bria/fibo-2/generate", "bria/fibo-2/edit"]
         )
 
+        # 验证热度为 null 且 heat_source 为 none
+        self.assertIsNone(flux["heat"])
+        self.assertEqual(flux.get("heat_source"), "none")
+        self.assertIsNone(fibo["heat"])
+        self.assertEqual(fibo.get("heat_source"), "none")
+
         # 验证 seen_terms 的 key 用模型族名，避免后续变体重复推送
         seen = {}
         key = tw.resolve_seen_key(flux["term"], flux["source_url"], seen)

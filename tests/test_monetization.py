@@ -106,6 +106,17 @@ class TestClassifyMonetization(unittest.TestCase):
         items.sort(key=lambda it: (tw.MONETIZATION_PATH_PRIORITY.get(it.get("monetization_path"), 3), tw.get_sort_key(it)))
         self.assertEqual([i["term"] for i in items], ["q", "t", "c", "w"])
 
+    def test_heat_null_sorts_at_end_of_same_route(self):
+        # 验证: 拿不到真实热度(heat=None)时，排在同一路线的最后，不参与和其他来源的比较
+        items = [
+            {"term": "q_null", "monetization_path": "quick_paid_site", "event_type": "new_model", "commercial_score": 8, "heat": None, "heat_source": "none"},
+            {"term": "q_real", "monetization_path": "quick_paid_site", "event_type": "new_model", "commercial_score": 8, "heat": 10, "heat_source": "run_count"},
+            {"term": "t_real", "monetization_path": "tool_page", "event_type": None, "commercial_score": 5, "heat": 50},
+        ]
+        items.sort(key=lambda it: (tw.MONETIZATION_PATH_PRIORITY.get(it.get("monetization_path"), 3), tw.get_sort_key(it)))
+        # q_real (有热度) 优先于 q_null (无热度)，但都在 quick_paid_site，先于 tool_page
+        self.assertEqual([i["term"] for i in items], ["q_real", "q_null", "t_real"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -573,12 +573,15 @@ def parse_heat(heat) -> int:
 
 
 def get_sort_key(item: dict) -> tuple:
-    """排序键：按 (event_type 优先级升序, commercial_score 降序, heat 降序)"""
+    """排序键：按 (heat 为空标志, event_type 优先级升序, commercial_score 降序, heat 降序)
+    拿不到真实热度时 heat 为 null，排序时 null 排在同一路线的最后，不参与和其他来源的比较。
+    """
+    has_no_heat = 1 if item.get('heat') is None else 0
     ev_type = item.get('event_type')
-    prio = EVENT_TYPE_PRIORITY.get(ev_type, 3)
+    prio = EVENT_TYPE_PRIORITY.get(ev_type, 4)
     c_score = item.get('commercial_score', 0)
     h_val = parse_heat(item.get('heat', 0))
-    return (prio, -c_score, -h_val)
+    return (has_no_heat, prio, -c_score, -h_val)
 
 
 # ===================== seen_terms 状态管理 (v2) =====================
@@ -2209,7 +2212,8 @@ def _fetch_fal_new_models(cutoff: datetime, limit: int = 5) -> list:
         results.append({
             "term": fam["family_name"],
             "source": "api_platform",
-            "heat": 80,
+            "heat": None,
+            "heat_source": "none",
             "intent": "tool",
             "commercial_score": 8,
             "event_type": "new_model",
@@ -2273,13 +2277,19 @@ def _fetch_replicate_new_models(cutoff: datetime, limit: int = 5) -> list:
                 pass
 
         run_count = m.get("run_count") or 0
-        heat = max(run_count // 100, 10)
+        if run_count > 0:
+            heat = max(run_count // 100, 1)
+            heat_source = "run_count"
+        else:
+            heat = None
+            heat_source = "none"
         display_name = name.replace("-", " ").title()
 
         results.append({
             "term": display_name,
             "source": "api_platform",
             "heat": heat,
+            "heat_source": heat_source,
             "intent": "tool",
             "commercial_score": 8,
             "event_type": "new_model",
