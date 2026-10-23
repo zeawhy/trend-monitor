@@ -452,6 +452,19 @@ REPOST_ACCOUNTS = {
     "thebloke",
 }
 
+# ---------------------------------------------------------------------------
+# GSC 首次展现过滤配置 (用户 2026-10-23 定)
+# ---------------------------------------------------------------------------
+GSC_MIN_IMPRESSIONS = 20  # 近 14 天展现数低于此值不推送为新机会
+SENSITIVE_TERMS = [        # 敏感词表：命中则 suggested_route=ignore、不推送
+    "artex",
+    "exploit",
+    "渗透",
+    "破解",
+    "绕过",
+    "jailbreak",
+]
+
 VERSION_UPDATE_SEEN_DAYS = 7  # first_seen_at 超过 7 天视作老产品版本更新
 
 
@@ -1851,6 +1864,72 @@ def fetch_github_breakout(seen: dict = None):
 # ---------------------------------------------------------------------------
 # 数据源 5: GSC "第一次有展现" 新词 (Google Search Console Search Analytics)
 # ---------------------------------------------------------------------------
+def check_gsc_sensitive(term: str) -> tuple:
+    """敏感词检查：命中 SENSITIVE_TERMS 则返回 (True, 命中的词)，否则 (False, '')。
+    命中者 suggested_route=ignore、不推送，drop_reason=sensitive。"""
+    low = term.strip().lower()
+    for s in SENSITIVE_TERMS:
+        if s.lower() in low:
+            return True, s
+    return False, ""
+
+
+def find_matching_page(term: str):
+    """在 page_tracking 里找主题相关的已有页面。
+
+    相关性判定（大小写不敏感）：词包含页面 term、页面 term 包含词、
+    或 topic_url 的 slug 包含词的核心 token。返回匹配的页面记录 dict，
+    无匹配返回 None。
+    """
+    low = term.strip().lower()
+    if not low:
+        return None
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base_dir, "hidden_files", "page_tracking.json")
+        with open(path, encoding="utf-8") as f:
+            pages = json.load(f)
+    except Exception:
+        return None
+    # 词的核心 token（去停用词、取最长的实词）
+    tokens = [t for t in re.split(r"[\s\-_]+", low) if len(t) >= 3]
+    core = max(tokens, key=len) if tokens else low
+    for p in pages:
+        pterm = (p.get("term") or "").strip().lower()
+        url = (p.get("topic_url") or "").strip().lower()
+        slug = url.rstrip("/").split("/")[-1] if url else ""
+        if not pterm and not slug:
+            continue
+        if (pterm and (pterm in low or low in pterm)) \
+                or (slug and (slug in low or core in slug)):
+            return p
+    return None
+
+
+def record_longtail_keyword(page: dict, term: str):
+    """把 GSC 新词记入已有页面的 longtail_keywords 列表（去重），写回文件。"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "hidden_files", "page_tracking.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            pages = json.load(f)
+    except Exception:
+        return
+    target_term = page.get("term")
+    target_url = page.get("topic_url")
+    for p in pages:
+        if p.get("term") == target_term and p.get("topic_url") == target_url:
+            kw = p.setdefault("longtail_keywords", [])
+            if term not in kw:
+                kw.append(term)
+            break
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(pages, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[GSC] 长尾词写回失败: {e}")
+
+
 def fetch_gsc_new_queries(update_baseline: bool = True):
     """GSC first-impression 新词发现：拉各站点近 14 天 query 数据，
     找出基线快照里从没出现过的新 query——这是真实用户搜到我们站的词，
@@ -1938,6 +2017,21 @@ def fetch_gsc_new_queries(update_baseline: bool = True):
     for site, term, m in new_terms[:5]:
         context = (f"GSC首次展现: {site} 近14天展现{m['impressions']}次"
                    f"点击{m['clicks']}次")
+        # 4c. 敏感词：一律 ignore、不推送
+        hit, sword = check_gsc_sensitive(term)
+        if hit:
+            print(f"[GSC] 过滤掉敏感词({sword}): {term}")
+            continue
+        # 4b. 展现数阈值
+        if m["impressions"] < GSC_MIN_IMPRESSIONS:
+            print(f"[GSC] 过滤掉展现不足(>{GSC_MIN_IMPRESSIONS}): {term}")
+            continue
+        # 4a. 命中已有页面主题：不推新机会，记入该页面长尾词
+        page = find_matching_page(term)
+        if page:
+            record_longtail_keyword(page, term)
+            print(f"[GSC] 记入长尾词({page.get('term')}): {term}")
+            continue
         valid, reason = check_candidate(term, context)
         if not valid:
             print(f"[GSC] 过滤掉{reason}: {term}")
