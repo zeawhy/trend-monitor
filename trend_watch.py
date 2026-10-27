@@ -2203,6 +2203,8 @@ def normalize_model_name(name_or_id: str) -> str:
 
 def _extract_fal_family(endpoint_id: str, display_name: str) -> tuple[str, str]:
     """从 fal.ai 的 endpoint_id 与 display_name 中提取 (family_path, family_name)。
+    逐段剥离尾部的任务/变体段（如 lora、text-to-image、base），直到非任务段为止；
+    若一段都剥不掉且原路径 >=3 段，则沿用旧行为去掉最后一段（org/model/endpoint 结构）。
     例如:
       endpoint_id: 'blackforestlabs/flux-3-max/text-to-video'
       display_name: 'FLUX 3 Max Text to Video'
@@ -2211,25 +2213,47 @@ def _extract_fal_family(endpoint_id: str, display_name: str) -> tuple[str, str]:
       endpoint_id: 'bria/fibo-2/generate'
       display_name: 'Fibo 2.0 Generate'
       -> family_path: 'bria/fibo-2', family_name: 'Fibo 2.0'
-    """
-    parts = endpoint_id.strip("/").split("/")
-    if len(parts) >= 3:
-        family_path = "/".join(parts[:-1])
-        endpoint_name = parts[-1]
-    else:
-        family_path = endpoint_id.strip("/")
-        endpoint_name = parts[-1] if parts else ""
 
-    family_name = display_name
-    if endpoint_name:
-        ep_words = endpoint_name.replace("-", " ").replace("_", " ")
-        pattern = r'[\s\-_:]*(?:' + re.escape(ep_words) + r'|' + re.escape(endpoint_name) + r')[\s\-_:]*$'
-        cleaned = re.sub(pattern, '', display_name, flags=re.IGNORECASE).strip()
-        if cleaned:
-            family_name = cleaned
-        elif len(parts) >= 2:
-            family_slug = parts[-2] if len(parts) >= 3 else parts[-1]
-            family_name = family_slug.replace("-", " ").title()
+      endpoint_id: 'blackforestlabs/flux-3/klein/base/text-to-image/lora'
+      display_name: 'FLUX 3 Klein Base Text to Image'
+      -> family_path: 'blackforestlabs/flux-3/klein', family_name: 'FLUX 3 Klein'
+      （旧逻辑只去尾段 lora，会把 Klein 的 4 个端点拆成 4 族，导致看板 4 条重复。）
+    """
+    parts = [p for p in endpoint_id.strip("/").split("/") if p]
+    if not parts:
+        return "", display_name
+
+    # 尾部任务/变体段（整段精确匹配）
+    task_segments = {
+        "text-to-image", "image-to-image", "edit-image", "text-to-video",
+        "image-to-video", "video-to-video", "text-to-speech", "speech-to-text",
+        "lora", "base", "distilled", "generate", "edit", "inpaint",
+        "upscale", "train", "preview",
+    }
+    stripped = []
+    while len(parts) > 2 and parts[-1].lower() in task_segments:
+        stripped.append(parts.pop())
+    if not stripped and len(parts) >= 3:
+        # 旧行为兜底：org/model/endpoint 结构，去最后一段
+        stripped.append(parts.pop())
+
+    family_path = "/".join(parts)
+
+    # 从 display_name 尾部依次剥掉被剥段对应的词组（按词匹配：
+    # 'edit-image' 对应显示词 'Edit' 时只剥 'Edit' 一个词）
+    words = [w for w in re.split(r'[\s\-_]+', display_name) if w]
+    for seg in stripped:
+        seg_words = [w for w in re.split(r'[\s\-_]+', seg) if w]
+        if not seg_words or not words:
+            continue
+        if (len(words) >= len(seg_words)
+                and [w.lower() for w in words[-len(seg_words):]] == [w.lower() for w in seg_words]):
+            words = words[:-len(seg_words)]
+        elif words[-1].lower() == seg_words[0].lower():
+            words = words[:-1]
+    family_name = " ".join(words)
+    if not family_name and len(parts) >= 2:
+        family_name = parts[-1].replace("-", " ").title()
 
     return family_path, family_name
 
