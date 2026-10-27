@@ -78,10 +78,18 @@
     "outcome": null,
     "page_url": "",
     "deadline": "2026-10-13T22:09:32.576726+08:00",
-    "notes": "",
+    "notes": "合并自：2.1 comfyui",
     "drop_reason": "系统建议 ignore；看板上线前的回填旧词（体育/股票/明星/泛词），批量清理",
-    "updated_at": "2026-10-21T15:08:26.765108+08:00",
-    "variants": [],
+    "updated_at": "2026-10-27T17:57:35.355486+08:00",
+    "variants": [
+      {
+        "term": "2.1 comfyui",
+        "source": "huggingface",
+        "source_url": "",
+        "discovered_at": "2026-10-11T22:09:32.576726+08:00",
+        "score": 86742
+      }
+    ],
     "family_key": "2.1"
   },
   {
@@ -100,23 +108,6 @@
     "updated_at": "2026-10-21T15:08:26.817058+08:00",
     "variants": [],
     "family_key": "qwen-2.1"
-  },
-  {
-    "term": "2.1 comfyui",
-    "source": "huggingface",
-    "discovered_at": "2026-10-11T22:09:32.576726+08:00",
-    "score": 86742,
-    "suggested_route": "ignore",
-    "decision": "drop",
-    "status": "dropped",
-    "outcome": null,
-    "page_url": "",
-    "deadline": "2026-10-13T22:09:32.576726+08:00",
-    "notes": "",
-    "drop_reason": "系统建议 ignore；看板上线前的回填旧词（体育/股票/明星/泛词），批量清理",
-    "updated_at": "2026-10-21T15:08:26.876175+08:00",
-    "variants": [],
-    "family_key": "2.1"
   },
   {
     "term": "comfyui diffusion",
@@ -724,27 +715,18 @@
     "outcome": null,
     "page_url": "",
     "deadline": "2026-10-24T05:08:25.475367+08:00",
-    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: text-to-video, image-to-video | 模型族: heygen/heygen-video | 变体数: 3 | 链接: https://fal.ai/models/heygen/heygen-video",
+    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: text-to-video, image-to-video | 模型族: heygen/heygen-video | 变体数: 3 | 链接: https://fal.ai/models/heygen/heygen-video；合并自：Heygen Voice",
     "drop_reason": "low_value",
-    "updated_at": "2026-10-27T17:57:21.641110+08:00",
-    "variants": [],
-    "family_key": "heygen"
-  },
-  {
-    "term": "Heygen Voice",
-    "source": "api_platform",
-    "discovered_at": "2026-10-22T05:08:25.475367+08:00",
-    "score": 8,
-    "suggested_route": "quick_paid_site",
-    "decision": null,
-    "status": "dropped",
-    "outcome": null,
-    "page_url": "",
-    "deadline": "2026-10-24T05:08:25.475367+08:00",
-    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: text-to-speech | 模型族: heygen/heygen-voice | 变体数: 2 | 链接: https://fal.ai/models/heygen/heygen-voice",
-    "drop_reason": "low_value",
-    "updated_at": "2026-10-27T17:57:21.814766+08:00",
-    "variants": [],
+    "updated_at": "2026-10-27T17:57:35.355507+08:00",
+    "variants": [
+      {
+        "term": "Heygen Voice",
+        "source": "api_platform",
+        "source_url": "",
+        "discovered_at": "2026-10-22T05:08:25.475367+08:00",
+        "score": 8
+      }
+    ],
     "family_key": "heygen"
   },
   {
@@ -758,27 +740,18 @@
     "outcome": null,
     "page_url": "",
     "deadline": "2026-10-24T05:08:25.475367+08:00",
-    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: video-to-video | 模型族: kling/v4/video-to-video | 变体数: 1 | 链接: https://fal.ai/models/kling/v4/video-to-video；加入 yuliusbox 视频成本计算器",
+    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: video-to-video | 模型族: kling/v4/video-to-video | 变体数: 1 | 链接: https://fal.ai/models/kling/v4/video-to-video；加入 yuliusbox 视频成本计算器；合并自：Kling 4.0",
     "drop_reason": null,
-    "updated_at": "2026-10-27T17:57:16.218731+08:00",
-    "variants": [],
-    "family_key": "kling-4.0"
-  },
-  {
-    "term": "Kling 4.0",
-    "source": "api_platform",
-    "discovered_at": "2026-10-22T05:08:25.475367+08:00",
-    "score": 8,
-    "suggested_route": "quick_paid_site",
-    "decision": "update_calculator_data",
-    "status": "decided",
-    "outcome": null,
-    "page_url": "",
-    "deadline": "2026-10-24T05:08:25.475367+08:00",
-    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: text-to-video, image-to-video, video-to-video | 模型族: kling/v4 | 变体数: 3 | 链接: https://fal.ai/models/kling/v4；加入 yuliusbox 视频成本计算器",
-    "drop_reason": null,
-    "updated_at": "2026-10-27T17:57:16.138916+08:00",
-    "variants": [],
+    "updated_at": "2026-10-27T17:57:35.355525+08:00",
+    "variants": [
+      {
+        "term": "Kling 4.0",
+        "source": "api_platform",
+        "source_url": "",
+        "discovered_at": "2026-10-22T05:08:25.475367+08:00",
+        "score": 8
+      }
+    ],
     "family_key": "kling-4.0"
   },
   {
@@ -979,27 +952,18 @@
     "outcome": null,
     "page_url": "",
     "deadline": "2026-10-26T05:08:23.674117+08:00",
-    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: video-to-video | 模型族: vast/eden-live-5b-video | 变体数: 1 | 链接: https://fal.ai/models/vast/eden-live-5b-video",
+    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: video-to-video | 模型族: vast/eden-live-5b-video | 变体数: 1 | 链接: https://fal.ai/models/vast/eden-live-5b-video；合并自：Eden Live 14B Video",
     "drop_reason": "low_value",
-    "updated_at": "2026-10-27T17:57:21.998333+08:00",
-    "variants": [],
-    "family_key": "eden-live"
-  },
-  {
-    "term": "Eden Live 14B Video",
-    "source": "api_platform",
-    "discovered_at": "2026-10-24T05:08:23.674117+08:00",
-    "score": 8,
-    "suggested_route": "quick_paid_site",
-    "decision": null,
-    "status": "dropped",
-    "outcome": null,
-    "page_url": "",
-    "deadline": "2026-10-26T05:08:23.674117+08:00",
-    "notes": "平台: fal.ai | 单价: 见模型页 | 类别: video-to-video | 模型族: vast/eden-live-14b-video | 变体数: 1 | 链接: https://fal.ai/models/vast/eden-live-14b-video",
-    "drop_reason": "low_value",
-    "updated_at": "2026-10-27T17:57:22.148868+08:00",
-    "variants": [],
+    "updated_at": "2026-10-27T17:57:35.355538+08:00",
+    "variants": [
+      {
+        "term": "Eden Live 14B Video",
+        "source": "api_platform",
+        "source_url": "",
+        "discovered_at": "2026-10-24T05:08:23.674117+08:00",
+        "score": 8
+      }
+    ],
     "family_key": "eden-live"
   },
   {
