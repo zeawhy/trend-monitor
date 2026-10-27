@@ -82,6 +82,7 @@ _FAMILY_DROP_TOKENS = {
     "gguf", "gptq", "awq", "fp8", "fp16", "bf16", "int4", "int8", "int2",
     "diffusers", "vae", "instruct", "chat", "preview", "dev", "schnell",
     "safetensors", "onnx", "exl2", "bnb", "generate", "generation",
+    "introducing", "announcing",
 }
 _SIZE_TOKEN_RE = re.compile(r"^\d+(\.\d+)?[bm]$")
 
@@ -135,6 +136,9 @@ def model_family_key(name: str) -> str:
     if not name:
         return ""
     s = name.split("/")[-1].strip().lower()
+    # 模型名里的字母-数字间点号是版本分隔符（FLUX.3 -> FLUX-3），先归一化；
+    # 数字-数字间点号是版本号本身（4.0），必须保留，不能直接按点切分
+    s = re.sub(r"(?<=[a-z])\.(?=\d)", "-", s)
     # 去日期后缀（复用与 trend_watch._DATE_SUFFIX_RE 同口径的规则）
     date_re = CONFIG.get("version_bump_date_re") or DEFAULT_CONFIG["version_bump_date_re"]
     try:

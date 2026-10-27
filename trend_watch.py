@@ -2526,8 +2526,101 @@ def _fetch_openrouter_new_models(cutoff: datetime, limit: int = 5) -> list:
     return results
 
 
+# BFL 官方博客解析：月份全称与缩写都认（旧正则只认全称，"Oct 15, 2026"
+# 这类缩写日期解析失败会导致帖子无日期、按本轮时间发现，Klein 公告即因此漏掉官方日）。
+_BFL_MONTHS = {
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+}
+_BFL_DATE_RE = re.compile(
+    r"(January|February|March|April|May|June|July|August|September|Sept|October|November|December"
+    r"|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+
+def _parse_bfl_date(text: str):
+    """从文本里解析 BFL 博客日期（全称/缩写月份均可），返回 date 或 None。"""
+    m = _BFL_DATE_RE.search(text or "")
+    if not m:
+        return None
+    month = _BFL_MONTHS.get(m.group(1).lower())
+    if not month:
+        return None
+    try:
+        return datetime(int(m.group(3)), month, int(m.group(2)), tzinfo=timezone.utc).date()
+    except ValueError:
+        return None
+
+
+def _clean_bfl_title(title: str) -> str:
+    """清洗 BFL 公告标题为模型名：去公告动词前缀，FLUX.3 这类字母-数字间点号改空格。"""
+    t = (title or "").strip()
+    t = re.sub(r"^(introducing|announcing)\s+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?<=[A-Za-z])\.(?=\d)", " ", t)
+    return t.strip()
+
+
+def parse_bfl_blog_posts(html: str) -> list:
+    """纯函数：解析 BFL 博客列表页 HTML，返回帖子列表。
+    每项 {title, slug, href, published_at(date 或 None), snippet}。
+    不发网络请求、不做 cutoff 过滤（cutoff 由调用方按需过滤），便于回归测试。"""
+    posts = re.findall(
+        r'<a[^>]+aria-label=[\"\']Read blog post:\s*([^\"\']+)[\"\'][^>]+href=[\"\'](/blog/[^\"\'#]+)[\"\'](.*?)</a>',
+        html,
+        re.DOTALL,
+    )
+    if not posts:
+        all_links = re.findall(r'href=[\"\'](/blog/[^\"\'#]+)[\"\'][^>]*>(.*?)</a>', html, re.DOTALL)
+        posts = [("", h, inner) for h, inner in all_links]
+
+    seen_slugs = set()
+    out = []
+    for raw_title, href, inner in posts:
+        slug = href.split('/')[-1]
+        if slug in seen_slugs or not slug:
+            continue
+        seen_slugs.add(slug)
+
+        clean_inner = re.sub(r'<[^>]+>', ' ', inner)
+        clean_inner = re.sub(r'\s+', ' ', clean_inner).strip()
+        published_at = _parse_bfl_date(clean_inner)
+
+        title = raw_title.strip() if raw_title else ""
+        if not title:
+            t = clean_inner
+            for prefix in ("Models News Research", "Models Research", "Products Models", "Research Models", "News Research", "Customer stories", "News", "Products"):
+                if t.startswith(prefix):
+                    t = t[len(prefix):].strip()
+            t = _BFL_DATE_RE.sub('', t).strip()
+            title = t or slug.replace('-', ' ').title()
+        title = _clean_bfl_title(title)
+
+        out.append({
+            "title": title,
+            "slug": slug,
+            "href": href,
+            "published_at": published_at,
+            "snippet": clean_inner[:200],
+        })
+    return out
+
+
 def _fetch_bfl_new_models(cutoff: datetime, limit: int = 5) -> list:
-    """抓取 Black Forest Labs (BFL) 官方博客/公告新发布的模型与工具。"""
+    """抓取 Black Forest Labs (BFL) 官方博客/公告新发布的模型与工具。
+    官方来源（source=bfl_official），只做轻量检查、失败静默跳过；
+    候选带 published_at（公告日），opps 层按模型族归组时 discovered_at
+    取最早来源（见 opps.record_opportunities），实现跨来源关联。"""
     results = []
     headers = {"User-Agent": "curl/8.0"}
     html = ""
@@ -2543,51 +2636,19 @@ def _fetch_bfl_new_models(cutoff: datetime, limit: int = 5) -> list:
     if not html:
         return results
 
-    posts = re.findall(
-        r'<a[^>]+aria-label=[\"\']Read blog post:\s*([^\"\']+)[\"\'][^>]+href=[\"\'](/blog/[^\"\'#]+)[\"\'](.*?)</a>',
-        html,
-        re.DOTALL,
-    )
-    if not posts:
-        all_links = re.findall(r'href=[\"\'](/blog/[^\"\'#]+)[\"\'][^>]*>(.*?)</a>', html, re.DOTALL)
-        posts = [("", h, inner) for h, inner in all_links]
-
-    seen_slugs = set()
-    for raw_title, href, inner in posts:
-        slug = href.split('/')[-1]
-        if slug in seen_slugs or not slug:
-            continue
-        seen_slugs.add(slug)
-
-        clean_inner = re.sub(r'<[^>]+>', ' ', inner)
-        clean_inner = re.sub(r'\s+', ' ', clean_inner).strip()
-
-        date_m = re.search(
-            r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})',
-            clean_inner,
-        )
-        if date_m:
-            try:
-                post_date = datetime.strptime(date_m.group(0), "%B %d, %Y").replace(tzinfo=timezone.utc)
-                if post_date < cutoff:
-                    continue
-            except Exception:
-                pass
-
-        title = raw_title.strip() if raw_title else ""
-        if not title:
-            t = clean_inner
-            for prefix in ("Models News Research", "Models Research", "Products Models", "Research Models", "News Research", "Customer stories", "News", "Products"):
-                if t.startswith(prefix):
-                    t = t[len(prefix):].strip()
-            t = re.sub(r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}.*$', '', t).strip()
-            title = t or slug.replace('-', ' ').title()
-
-        article_url = f"https://bfl.ai{href}"
+    for post in parse_bfl_blog_posts(html):
+        if post["published_at"] is not None:
+            post_dt = datetime(post["published_at"].year, post["published_at"].month,
+                               post["published_at"].day, tzinfo=timezone.utc)
+            if post_dt < cutoff:
+                continue
+        title = post["title"]
+        article_url = f"https://bfl.ai{post['href']}"
         results.append({
             "term": title,
-            "source": "api_platform",
-            "heat": 90,
+            "source": "bfl_official",
+            "heat": None,
+            "heat_source": "none",
             "intent": "tool",
             "commercial_score": 9,
             "event_type": "new_model",
@@ -2596,8 +2657,9 @@ def _fetch_bfl_new_models(cutoff: datetime, limit: int = 5) -> list:
             "api_available": True,
             "pipeline_tag": "image-generation",
             "platform": "bfl",
-            "description": clean_inner[:200],
+            "description": post["snippet"],
             "unit_price": "见模型页",
+            "published_at": post["published_at"].isoformat() if post["published_at"] else None,
         })
         if len(results) >= limit:
             break

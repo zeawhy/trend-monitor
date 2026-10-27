@@ -52,15 +52,21 @@ def now_iso() -> str:
 
 
 def _parse_datetime(s):
+    """解析 ISO 时间；无时区时按北京时间 (+08:00) 理解（与 now_iso 同口径），
+    避免 naive 与 aware 混比抛 TypeError（BFL 公告日是裸日期）。"""
     if not s:
         return None
+    dt = None
     try:
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
     except Exception:
         try:
-            return datetime.strptime(str(s)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(str(s)[:10], "%Y-%m-%d")
         except Exception:
             return None
+    if dt is not None and dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    return dt
 
 
 def map_suggested_route(monetization_path: str = None, intent: str = None, event_type: str = None) -> str:
@@ -333,7 +339,7 @@ def _fold_variant(base: dict, var: dict):
 def record_opportunities(candidates: list, path: str = OPPS_PATH, wt_path: str = None) -> int:
     """系统新发现的词自动写入 opportunities.json (status=new)。
     同一模型族（family_key 相同）只保留一条，变体折进 variants；
-    官方来源（bfl_official）用公告日做 discovered_at（跨来源取最早）；
+    候选带 published_at（官方公告日）时用它做 discovered_at（跨来源取最早）；
     命中敏感词表的直接记 dropped（drop_reason=sensitive），不推送。
     返回新增记录数量。
     """
@@ -396,7 +402,7 @@ def record_opportunities(candidates: list, path: str = OPPS_PATH, wt_path: str =
 
             # 官方公告日优先（跨来源取最早发现时间）
             disc = now_str
-            if c.get("source") == "bfl_official" and c.get("published_at"):
+            if c.get("published_at"):
                 pd = _parse_datetime(c["published_at"])
                 if pd:
                     disc = pd.isoformat()
