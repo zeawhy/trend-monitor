@@ -1,4 +1,12 @@
-"""第 6 项测试:命中率按变现路线分组 + word_tracking 记录 monetization_path。"""
+"""命中率新定义测试（B2，2026-10-27 用户定）。
+
+新定义：
+- 有上线页面：14 天内 GSC 展现 >= 20 算命中；无 GSC 数据 → pending。
+- 无页面：热度 7 天增长率 >= 2.0 倍算命中；历史不足 7 天 → pending。
+- 按来源和路线分别统计（huggingface、api_platform 全部计入）；
+  pending 不计入命中率分母；旧 Trends 翻倍标准已废弃。
+运行：python3 -m unittest tests.test_hit_rate_paths -v
+"""
 import json
 import os
 import sys
@@ -10,16 +18,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import trend_watch as tw
 
-OLD = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+NOW = datetime.now(timezone.utc)
+OLD = (NOW - timedelta(days=20)).isoformat()
+D20 = (NOW - timedelta(days=20)).strftime("%Y-%m-%d")
+D13 = (NOW - timedelta(days=13)).strftime("%Y-%m-%d")
+D1 = (NOW - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-def rec(term, source, path, checked, hit):
+def heat_rec(term, source, path, heats):
+    """heats: [(date_str, heat)]，按顺序构成 heat_history。"""
     return {
         "term": term, "discovered_at": OLD, "source": source,
-        "initial_heat": 10, "heat_history": [{"date": OLD[:10], "heat": 10}],
+        "initial_heat": heats[0][1],
+        "heat_history": [{"date": d, "ts": f"{d}T05:00:00+08:00", "heat": h} for d, h in heats],
         "source_url": "", "monetization_path": path,
-        "checked": checked, "hit": hit,
-        "heat_at_discovery": 5, "heat_after_14d": 20, "check_time": OLD,
+        "checked": False, "hit": None,
     }
 
 
@@ -41,41 +54,82 @@ class TestRecordDiscoveredTerms(unittest.TestCase):
             tw.record_discovered_terms(cands, p, OLD)
             data = json.load(open(p, encoding="utf-8"))
             self.assertIsNone(data[0]["initial_heat"])
-            self.assertEqual(data[0]["heat_history"], [{"date": OLD[:10], "heat": None}])
+            # B1 起新点带 ts 字段
+            self.assertEqual(data[0]["heat_history"],
+                             [{"date": OLD[:10], "ts": OLD, "heat": None}])
 
 
-class TestHitRateByPath(unittest.TestCase):
-    def test_grouping_and_quick_paid_standard(self):
-        with tempfile.TemporaryDirectory() as d:
-            tp = os.path.join(d, "word_tracking.json")
+class TestHitRateNewDefinition(unittest.TestCase):
+    def setUp(self):
+        # 隔离 page 匹配：默认无页面，走热度分支
+        self._orig_find = tw._hit_page_match
+        tw._hit_page_match = lambda term: None
+
+    def tearDown(self):
+        tw._hit_page_match = self._orig_find
+
+    def _run(self, data):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        tp = os.path.join(d.name, "word_tracking.json")
+        with open(tp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        report = tw.check_hit_rate(tracking_path=tp, output_dir=d.name)
+        return report, json.load(open(tp, encoding="utf-8"))
+
+    def test_heat_branch_hit_and_miss(self):
+        data = [
+            heat_rec("hot1", "huggingface", "content", [(D20, 100), (D1, 250)]),   # 2.5 倍 → 命中
+            heat_rec("flat1", "api_platform", "content", [(D20, 100), (D1, 150)]),  # 1.5 倍 → 未命中
+        ]
+        report, _after = self._run(data)
+        self.assertEqual(report["overall"]["total_evaluated"], 2)
+        self.assertEqual(report["overall"]["total_hits"], 1)
+        self.assertEqual(report["overall"]["hit_rate"], "50.0%")
+        # 来源分别统计：huggingface、api_platform 都计入
+        self.assertEqual(report["sources"]["huggingface"]["hit_rate"], "100.0%")
+        self.assertEqual(report["sources"]["api_platform"]["hit_rate"], "0.0%")
+        self.assertEqual(report["paths"]["content"]["total"], 2)
+        self.assertEqual(report["paths"]["content"]["hits"], 1)
+
+    def test_heat_branch_pending_not_counted(self):
+        data = [
+            heat_rec("single", "reddit", "content", [(D1, 90)]),                    # 只有 1 点
+            heat_rec("short", "reddit", "content", [(D1, 100), (D1, 300)]),         # 跨度不足 7 天
+            heat_rec("hot1", "github_breakout", "content", [(D20, 100), (D1, 250)]),
+        ]
+        report, after = self._run(data)
+        self.assertEqual(report["overall"]["total_evaluated"], 1)
+        self.assertEqual(report["overall"]["total_hits"], 1)
+        self.assertEqual(report["overall"]["pending"], 2)
+        self.assertEqual(len(report["pending_details"]), 2)
+        # pending 不算未命中：checked 保持 False，下轮重试
+        pend = {r["term"]: r for r in after if r["term"] in ("single", "short")}
+        self.assertFalse(pend["single"]["checked"])
+        self.assertIsNone(pend["single"]["hit"])
+
+    def test_page_branch_gsc_threshold(self):
+        # 页面分支：mock GSC 存量快照，25 展现命中、5 展现未命中、无数据 pending
+        orig_stored = tw._stored_gsc_impressions_14d
+        orig_live = tw._live_gsc_page_daily
+        tw._hit_page_match = lambda term: {
+            "term": term, "topic_url": f"https://yuliuswiki.com/{term}"}
+        impressions = {"hitpage": 25, "misspage": 5}
+        tw._stored_gsc_impressions_14d = lambda page, now: impressions.get(page["term"])
+        tw._live_gsc_page_daily = lambda url: None
+        try:
             data = [
-                rec("c1", "reddit", "content", True, True),
-                rec("c2", "reddit", "content", True, False),
-                rec("t1", "github_breakout", "tool_page", True, True),
-                rec("q1", "huggingface", "quick_paid_site", False, None),  # 不应被 Trends 核验
-                rec("l1", "reddit", None, True, True),  # 旧记录 → legacy
+                heat_rec("hitpage", "huggingface", "content", [(D20, 100), (D1, 110)]),
+                heat_rec("misspage", "huggingface", "content", [(D20, 100), (D1, 110)]),
+                heat_rec("nodata", "huggingface", "content", [(D20, 100), (D1, 110)]),
             ]
-            with open(tp, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-            report = tw.check_hit_rate(tracking_path=tp, output_dir=d)
-            paths = report["paths"]
-            self.assertEqual(paths["content"]["total"], 2)
-            self.assertEqual(paths["content"]["hits"], 1)
-            self.assertEqual(paths["tool_page"]["hit_rate"], "100.0%")
-            self.assertEqual(paths["legacy"]["total"], 1)
-            q = paths["quick_paid_site"]
-            self.assertEqual(q["tracked"], 1)
-            self.assertEqual(q["total"], 0)
-            self.assertIsNone(q["hit_rate"])
-            self.assertEqual(q["standard"], "以 page_tracking 第 7 天净收入为准")
-            # quick_paid_site 记录没有被 Trends 标记 checked
-            after = json.load(open(tp, encoding="utf-8"))
-            q1 = [r for r in after if r["term"] == "q1"][0]
-            self.assertFalse(q1["checked"])
-            # MD 报告包含路线表和判定标准标注
-            md = open(os.path.join(d, "hit_rate_report.md"), encoding="utf-8").read()
-            self.assertIn("各变现路线命中率统计", md)
-            self.assertIn("以 page_tracking 第 7 天净收入为准", md)
+            report, _after = self._run(data)
+        finally:
+            tw._stored_gsc_impressions_14d = orig_stored
+            tw._live_gsc_page_daily = orig_live
+        self.assertEqual(report["overall"]["total_evaluated"], 2)
+        self.assertEqual(report["overall"]["total_hits"], 1)
+        self.assertEqual(report["overall"]["pending"], 1)
 
     def test_legacy_identification_and_exclusion(self):
         # 1. 验证 is_legacy_tracking_entry 识别逻辑
@@ -87,30 +141,57 @@ class TestHitRateByPath(unittest.TestCase):
         self.assertFalse(tw.is_legacy_tracking_entry({"source": "huggingface", "term": "Wan2.5-T2V"}))
 
         # 2. 验证 check_hit_rate 默认排除 legacy 条目，且不删除原始数据
-        with tempfile.TemporaryDirectory() as d:
-            tp = os.path.join(d, "word_tracking.json")
-            data = [
-                rec("active1", "github_breakout", "tool_page", True, True),
-                rec("nfl plus", "google_trends", None, True, False),
-                rec("image 2.1", "huggingface", None, True, False),
-            ]
-            with open(tp, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+        data = [
+            heat_rec("active1", "github_breakout", "tool_page", [(D20, 100), (D1, 250)]),
+            heat_rec("nfl plus", "google_trends", None, [(D20, 100), (D1, 250)]),
+            heat_rec("image 2.1", "huggingface", None, [(D20, 100), (D1, 250)]),
+        ]
+        report, after = self._run(data)
+        # 活跃追踪数和评估数仅计算 active1，排除 2 个 legacy
+        self.assertEqual(report["overall"]["total_tracked"], 1)
+        self.assertEqual(report["overall"]["total_evaluated"], 1)
+        self.assertEqual(report["overall"]["total_hits"], 1)
+        self.assertEqual(report["overall"]["hit_rate"], "100.0%")
 
-            report = tw.check_hit_rate(tracking_path=tp, output_dir=d)
-            # 活跃追踪数和评估数仅计算 active1，排除 2 个 legacy
-            self.assertEqual(report["overall"]["total_tracked"], 1)
-            self.assertEqual(report["overall"]["total_evaluated"], 1)
-            self.assertEqual(report["overall"]["total_hits"], 1)
-            self.assertEqual(report["overall"]["hit_rate"], "100.0%")
-
-            # 原始数据未删除，且被标记 legacy=True
-            after = json.load(open(tp, encoding="utf-8"))
-            self.assertEqual(len(after), 3)
-            self.assertTrue(next(r for r in after if r["term"] == "nfl plus")["legacy"])
-            self.assertTrue(next(r for r in after if r["term"] == "image 2.1")["legacy"])
-            self.assertFalse(next(r for r in after if r["term"] == "active1").get("legacy", False))
+        # 原始数据未删除，且被标记 legacy=True
+        self.assertEqual(len(after), 3)
+        self.assertTrue(next(r for r in after if r["term"] == "nfl plus")["legacy"])
+        self.assertTrue(next(r for r in after if r["term"] == "image 2.1")["legacy"])
+        self.assertFalse(next(r for r in after if r["term"] == "active1").get("legacy", False))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHitPageMatch(unittest.TestCase):
+    """命中率严格页面匹配：通用 token（image/video）不能造成跨主题误归因。"""
+    PAGES = [
+        {"term": "Moss Image Pricing", "topic_url": "https://yuliuswiki.com/moss-image-pricing"},
+        {"term": "AI video generation cost calculator", "topic_url": "https://www.yuliusbox.com/ai-video-cost-calculator"},
+        {"term": "FLUX 3 Max vs Seedance 2.5 vs MiniMax H3", "topic_url": "https://yuliuswiki.com/flux-3-max-vs-seedance-minimax-h3"},
+        {"term": "Kromoss", "topic_url": "https://yuliuswiki.com/kromoss-guide"},
+        {"term": "Ideogram Vector Guide", "topic_url": "https://yuliuswiki.com/ideogram-vector-guide"},
+    ]
+
+    def test_no_false_positive_generic_token(self):
+        # 'image' 是通用词，不能把 Klein 归因到 Moss 定价页
+        self.assertIsNone(tw._hit_page_match_in("flux-3-image-klein-comfy", self.PAGES))
+        # 'video' 是通用词，不能把视频模型归因到计算器页
+        self.assertIsNone(tw._hit_page_match_in("FLUX 3 Max Text to Video", self.PAGES))
+        self.assertIsNone(tw._hit_page_match_in("Eden Live 5B Video", self.PAGES))
+
+    def test_true_matches(self):
+        self.assertEqual(
+            tw._hit_page_match_in("Moss Image", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/moss-image-pricing")
+        self.assertEqual(
+            tw._hit_page_match_in("Ideogram Vector", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/ideogram-vector-guide")
+        self.assertEqual(
+            tw._hit_page_match_in("Kromoss", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/kromoss-guide")
+        # 'minimax' 是 distinctive token（7 字符、非通用），可匹配同厂商对比文
+        self.assertEqual(
+            tw._hit_page_match_in("MiniMax-M3.1-Flash", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/flux-3-max-vs-seedance-minimax-h3")

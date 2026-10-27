@@ -14,7 +14,7 @@ trend_watch.py - 新词监控脚本，用于发现刚冒头的搜索新词。
     5. Google Trends（仅验证源，不做发现）：14 天命中率核验时用 Trends 查词的持续热度；
        注意丢弃最近 2 天未结算数据，避免 0→100 假峰值误判。
     6. 过滤与分类：过滤纯人名八卦与无明确意图词，保留工具型（tool）或资讯型（info）意图的词。
-    7. 命中率追踪：将新发现词写入 hidden_files/word_tracking.json；通过 check_hit_rate() 对 14 天前的词用 Google Trends 核验热度翻倍情况并输出报告。
+    7. 命中率追踪：将新发现词写入 hidden_files/word_tracking.json；通过 check_hit_rate() 按新定义核验（有页面看 14 天内 GSC 展现，未做页面看 7 天热度增长率）并输出报告。
     8. Jev 打分层：用 TypeSafe Jev 结构化决策模型给候选词打三维分（是否产品/技术名、商业意图、
        新词价值），通道由 JEV_PROVIDER 切换（openrouter 默认，无 key 回退 OpenCode Zen 免费通道），失败不阻塞。
     9. 变现分流：Jev 后按 classify_monetization 把候选分到 quick_paid_site / tool_page /
@@ -39,9 +39,19 @@ os.environ['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 
 import requests
 import pandas as pd
-from pytrends.request import TrendReq
+try:
+    # pytrends 仅旧命中率逻辑在用；新逻辑已去掉 Trends 调用，缺失也不影响 import
+    from pytrends.request import TrendReq
+except ImportError:
+    TrendReq = None
 from huggingface_hub import HfApi
 from lock_utils import ConcurrencyLock
+from trend_config import (
+    classify_derivative,
+    is_sensitive,
+    normalize_heat,
+    quick_site_downgrade,
+)
 
 # ---------------------------------------------------------------------------
 # Monkey-patch pytrends TrendReq 以适应 Google Trends 最新的 API 变动
@@ -83,7 +93,9 @@ def _patch_pytrends():
 
     TrendReq._tokens = _patched_tokens
 
-_patch_pytrends()
+
+if TrendReq is not None:
+    _patch_pytrends()
 
 
 # ---------------------------------------------------------------------------
@@ -1367,6 +1379,12 @@ def classify_monetization(item: dict) -> tuple:
         or _is_media_category(item.get('pipeline_tag') or '')
     )
     if (item.get('event_type') == 'new_model' or is_media) and item.get('api_available'):
+        # B7 快站降级门：官方已有免费入口 / 开放权重 / 图片单价过高 /
+        # 品牌已成熟（HeyGen、Kling 等）任一满足即降级为 content，并写明原因；
+        # 字段缺失跳过该条（不臆测，尤其不默认 fal 自带 playground 就降级）
+        downgrade, reason = quick_site_downgrade(item)
+        if downgrade:
+            return 'content', f'快站降级为内容：{reason}'
         return 'quick_paid_site', '抢 48 小时窗口：积分制付费站（媒体生成新模型且 API 可用）'
     # 2. 工具/付费意图 → yuliusbox 工具页
     if item.get('intent') == 'tool' or jev.get('intent') in ('paid_tool', 'media_generation'):
@@ -1865,13 +1883,17 @@ def fetch_github_breakout(seen: dict = None):
 # 数据源 5: GSC "第一次有展现" 新词 (Google Search Console Search Analytics)
 # ---------------------------------------------------------------------------
 def check_gsc_sensitive(term: str) -> tuple:
-    """敏感词检查：命中 SENSITIVE_TERMS 则返回 (True, 命中的词)，否则 (False, '')。
-    命中者 suggested_route=ignore、不推送，drop_reason=sensitive。"""
-    low = term.strip().lower()
-    for s in SENSITIVE_TERMS:
-        if s.lower() in low:
-            return True, s
-    return False, ""
+    """敏感词检查：命中配置化敏感词表则返回 (True, 命中的词)，否则 (False, '')。
+    命中者 suggested_route=ignore、不推送，drop_reason=sensitive。
+    词表唯一来源是 trend_config（config.json 可调），本地 SENSITIVE_TERMS 仅作回退。"""
+    try:
+        return is_sensitive(term)
+    except Exception:
+        low = term.strip().lower()
+        for s in SENSITIVE_TERMS:
+            if s.lower() in low:
+                return True, s
+        return False, ""
 
 
 def find_matching_page(term: str):
@@ -2203,6 +2225,8 @@ def normalize_model_name(name_or_id: str) -> str:
 
 def _extract_fal_family(endpoint_id: str, display_name: str) -> tuple[str, str]:
     """从 fal.ai 的 endpoint_id 与 display_name 中提取 (family_path, family_name)。
+    逐段剥离尾部的任务/变体段（如 lora、text-to-image、base），直到非任务段为止；
+    若一段都剥不掉且原路径 >=3 段，则沿用旧行为去掉最后一段（org/model/endpoint 结构）。
     例如:
       endpoint_id: 'blackforestlabs/flux-3-max/text-to-video'
       display_name: 'FLUX 3 Max Text to Video'
@@ -2211,25 +2235,47 @@ def _extract_fal_family(endpoint_id: str, display_name: str) -> tuple[str, str]:
       endpoint_id: 'bria/fibo-2/generate'
       display_name: 'Fibo 2.0 Generate'
       -> family_path: 'bria/fibo-2', family_name: 'Fibo 2.0'
-    """
-    parts = endpoint_id.strip("/").split("/")
-    if len(parts) >= 3:
-        family_path = "/".join(parts[:-1])
-        endpoint_name = parts[-1]
-    else:
-        family_path = endpoint_id.strip("/")
-        endpoint_name = parts[-1] if parts else ""
 
-    family_name = display_name
-    if endpoint_name:
-        ep_words = endpoint_name.replace("-", " ").replace("_", " ")
-        pattern = r'[\s\-_:]*(?:' + re.escape(ep_words) + r'|' + re.escape(endpoint_name) + r')[\s\-_:]*$'
-        cleaned = re.sub(pattern, '', display_name, flags=re.IGNORECASE).strip()
-        if cleaned:
-            family_name = cleaned
-        elif len(parts) >= 2:
-            family_slug = parts[-2] if len(parts) >= 3 else parts[-1]
-            family_name = family_slug.replace("-", " ").title()
+      endpoint_id: 'blackforestlabs/flux-3/klein/base/text-to-image/lora'
+      display_name: 'FLUX 3 Klein Base Text to Image'
+      -> family_path: 'blackforestlabs/flux-3/klein', family_name: 'FLUX 3 Klein'
+      （旧逻辑只去尾段 lora，会把 Klein 的 4 个端点拆成 4 族，导致看板 4 条重复。）
+    """
+    parts = [p for p in endpoint_id.strip("/").split("/") if p]
+    if not parts:
+        return "", display_name
+
+    # 尾部任务/变体段（整段精确匹配）
+    task_segments = {
+        "text-to-image", "image-to-image", "edit-image", "text-to-video",
+        "image-to-video", "video-to-video", "text-to-speech", "speech-to-text",
+        "lora", "base", "distilled", "generate", "edit", "inpaint",
+        "upscale", "train", "preview",
+    }
+    stripped = []
+    while len(parts) > 2 and parts[-1].lower() in task_segments:
+        stripped.append(parts.pop())
+    if not stripped and len(parts) >= 3:
+        # 旧行为兜底：org/model/endpoint 结构，去最后一段
+        stripped.append(parts.pop())
+
+    family_path = "/".join(parts)
+
+    # 从 display_name 尾部依次剥掉被剥段对应的词组（按词匹配：
+    # 'edit-image' 对应显示词 'Edit' 时只剥 'Edit' 一个词）
+    words = [w for w in re.split(r'[\s\-_]+', display_name) if w]
+    for seg in stripped:
+        seg_words = [w for w in re.split(r'[\s\-_]+', seg) if w]
+        if not seg_words or not words:
+            continue
+        if (len(words) >= len(seg_words)
+                and [w.lower() for w in words[-len(seg_words):]] == [w.lower() for w in seg_words]):
+            words = words[:-len(seg_words)]
+        elif words[-1].lower() == seg_words[0].lower():
+            words = words[:-1]
+    family_name = " ".join(words)
+    if not family_name and len(parts) >= 2:
+        family_name = parts[-1].replace("-", " ").title()
 
     return family_path, family_name
 
@@ -2496,8 +2542,101 @@ def _fetch_openrouter_new_models(cutoff: datetime, limit: int = 5) -> list:
     return results
 
 
+# BFL 官方博客解析：月份全称与缩写都认（旧正则只认全称，"Oct 15, 2026"
+# 这类缩写日期解析失败会导致帖子无日期、按本轮时间发现，Klein 公告即因此漏掉官方日）。
+_BFL_MONTHS = {
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+}
+_BFL_DATE_RE = re.compile(
+    r"(January|February|March|April|May|June|July|August|September|Sept|October|November|December"
+    r"|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+
+def _parse_bfl_date(text: str):
+    """从文本里解析 BFL 博客日期（全称/缩写月份均可），返回 date 或 None。"""
+    m = _BFL_DATE_RE.search(text or "")
+    if not m:
+        return None
+    month = _BFL_MONTHS.get(m.group(1).lower())
+    if not month:
+        return None
+    try:
+        return datetime(int(m.group(3)), month, int(m.group(2)), tzinfo=timezone.utc).date()
+    except ValueError:
+        return None
+
+
+def _clean_bfl_title(title: str) -> str:
+    """清洗 BFL 公告标题为模型名：去公告动词前缀，FLUX.3 这类字母-数字间点号改空格。"""
+    t = (title or "").strip()
+    t = re.sub(r"^(introducing|announcing)\s+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?<=[A-Za-z])\.(?=\d)", " ", t)
+    return t.strip()
+
+
+def parse_bfl_blog_posts(html: str) -> list:
+    """纯函数：解析 BFL 博客列表页 HTML，返回帖子列表。
+    每项 {title, slug, href, published_at(date 或 None), snippet}。
+    不发网络请求、不做 cutoff 过滤（cutoff 由调用方按需过滤），便于回归测试。"""
+    posts = re.findall(
+        r'<a[^>]+aria-label=[\"\']Read blog post:\s*([^\"\']+)[\"\'][^>]+href=[\"\'](/blog/[^\"\'#]+)[\"\'](.*?)</a>',
+        html,
+        re.DOTALL,
+    )
+    if not posts:
+        all_links = re.findall(r'href=[\"\'](/blog/[^\"\'#]+)[\"\'][^>]*>(.*?)</a>', html, re.DOTALL)
+        posts = [("", h, inner) for h, inner in all_links]
+
+    seen_slugs = set()
+    out = []
+    for raw_title, href, inner in posts:
+        slug = href.split('/')[-1]
+        if slug in seen_slugs or not slug:
+            continue
+        seen_slugs.add(slug)
+
+        clean_inner = re.sub(r'<[^>]+>', ' ', inner)
+        clean_inner = re.sub(r'\s+', ' ', clean_inner).strip()
+        published_at = _parse_bfl_date(clean_inner)
+
+        title = raw_title.strip() if raw_title else ""
+        if not title:
+            t = clean_inner
+            for prefix in ("Models News Research", "Models Research", "Products Models", "Research Models", "News Research", "Customer stories", "News", "Products"):
+                if t.startswith(prefix):
+                    t = t[len(prefix):].strip()
+            t = _BFL_DATE_RE.sub('', t).strip()
+            title = t or slug.replace('-', ' ').title()
+        title = _clean_bfl_title(title)
+
+        out.append({
+            "title": title,
+            "slug": slug,
+            "href": href,
+            "published_at": published_at,
+            "snippet": clean_inner[:200],
+        })
+    return out
+
+
 def _fetch_bfl_new_models(cutoff: datetime, limit: int = 5) -> list:
-    """抓取 Black Forest Labs (BFL) 官方博客/公告新发布的模型与工具。"""
+    """抓取 Black Forest Labs (BFL) 官方博客/公告新发布的模型与工具。
+    官方来源（source=bfl_official），只做轻量检查、失败静默跳过；
+    候选带 published_at（公告日），opps 层按模型族归组时 discovered_at
+    取最早来源（见 opps.record_opportunities），实现跨来源关联。"""
     results = []
     headers = {"User-Agent": "curl/8.0"}
     html = ""
@@ -2513,51 +2652,19 @@ def _fetch_bfl_new_models(cutoff: datetime, limit: int = 5) -> list:
     if not html:
         return results
 
-    posts = re.findall(
-        r'<a[^>]+aria-label=[\"\']Read blog post:\s*([^\"\']+)[\"\'][^>]+href=[\"\'](/blog/[^\"\'#]+)[\"\'](.*?)</a>',
-        html,
-        re.DOTALL,
-    )
-    if not posts:
-        all_links = re.findall(r'href=[\"\'](/blog/[^\"\'#]+)[\"\'][^>]*>(.*?)</a>', html, re.DOTALL)
-        posts = [("", h, inner) for h, inner in all_links]
-
-    seen_slugs = set()
-    for raw_title, href, inner in posts:
-        slug = href.split('/')[-1]
-        if slug in seen_slugs or not slug:
-            continue
-        seen_slugs.add(slug)
-
-        clean_inner = re.sub(r'<[^>]+>', ' ', inner)
-        clean_inner = re.sub(r'\s+', ' ', clean_inner).strip()
-
-        date_m = re.search(
-            r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})',
-            clean_inner,
-        )
-        if date_m:
-            try:
-                post_date = datetime.strptime(date_m.group(0), "%B %d, %Y").replace(tzinfo=timezone.utc)
-                if post_date < cutoff:
-                    continue
-            except Exception:
-                pass
-
-        title = raw_title.strip() if raw_title else ""
-        if not title:
-            t = clean_inner
-            for prefix in ("Models News Research", "Models Research", "Products Models", "Research Models", "News Research", "Customer stories", "News", "Products"):
-                if t.startswith(prefix):
-                    t = t[len(prefix):].strip()
-            t = re.sub(r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}.*$', '', t).strip()
-            title = t or slug.replace('-', ' ').title()
-
-        article_url = f"https://bfl.ai{href}"
+    for post in parse_bfl_blog_posts(html):
+        if post["published_at"] is not None:
+            post_dt = datetime(post["published_at"].year, post["published_at"].month,
+                               post["published_at"].day, tzinfo=timezone.utc)
+            if post_dt < cutoff:
+                continue
+        title = post["title"]
+        article_url = f"https://bfl.ai{post['href']}"
         results.append({
             "term": title,
-            "source": "api_platform",
-            "heat": 90,
+            "source": "bfl_official",
+            "heat": None,
+            "heat_source": "none",
             "intent": "tool",
             "commercial_score": 9,
             "event_type": "new_model",
@@ -2566,8 +2673,9 @@ def _fetch_bfl_new_models(cutoff: datetime, limit: int = 5) -> list:
             "api_available": True,
             "pipeline_tag": "image-generation",
             "platform": "bfl",
-            "description": clean_inner[:200],
+            "description": post["snippet"],
             "unit_price": "见模型页",
+            "published_at": post["published_at"].isoformat() if post["published_at"] else None,
         })
         if len(results) >= limit:
             break
@@ -2690,9 +2798,15 @@ def save_tracking_data(path: str, data: list):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso: str):
+def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso: str,
+                            create_new: bool = True):
     """将新发现的候选词追加写入 hidden_files/word_tracking.json；
-    已在追踪中的词追加本轮热度到 heat_history（按天去重），并补 source_url。"""
+    已在追踪中的词每轮追加一个热度点 (term, ts, heat) 到 heat_history。
+    注意：旧逻辑按天去重（同一天多轮只记 1 点）且只对再次进入输出的词追加，
+    导致 82/85 条追踪只有 1 个点、看板“热度走势/趋势”全空；新逻辑每轮都记点
+    （保留 date 字段兼容旧看板，新增 ts 字段做 7 天变化率计算），
+    heat_history 上限 200 点（6 小时一轮约覆盖 50 天，14 天窗口绰绰有余）。
+    create_new=False 时只给已追踪词追加热度点，不新建条目（供过滤项复用）。"""
     tracking_data = load_tracking_data(tracking_path)
     existing = {}
     for item in tracking_data:
@@ -2710,12 +2824,14 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
         heat = parse_heat(raw_heat) if raw_heat is not None else None
         url = c.get('source_url', '')
         if key not in existing:
+            if not create_new:
+                continue
             item = {
                 "term": term,
                 "discovered_at": timestamp_iso,
                 "source": source,
                 "initial_heat": heat,
-                "heat_history": [{"date": day, "heat": heat}],
+                "heat_history": [{"date": day, "ts": timestamp_iso, "heat": heat}],
                 "source_url": url,
                 "monetization_path": c.get('monetization_path'),
                 "checked": False,
@@ -2731,12 +2847,18 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
             if not item.get("heat_history"):
                 item["heat_history"] = [{
                     "date": (item.get("discovered_at") or timestamp_iso)[:10],
+                    "ts": item.get("discovered_at") or timestamp_iso,
                     "heat": item.get("initial_heat"),
                 }]
             hist = item["heat_history"]
-            if not hist or hist[-1].get("date") != day:
-                hist.append({"date": day, "heat": heat})
-                changed = True
+            # 每轮都记点（不再按天去重），并补齐旧点的 ts
+            for p in hist:
+                if isinstance(p, dict) and not p.get("ts") and p.get("date"):
+                    p["ts"] = p["date"] + "T00:00:00+08:00"
+            hist.append({"date": day, "ts": timestamp_iso, "heat": heat})
+            if len(hist) > 200:
+                del hist[:-200]
+            changed = True
             if url and not item.get("source_url"):
                 item["source_url"] = url
                 changed = True
@@ -2752,12 +2874,268 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
         print(f"[命中率追踪] 本批次候选词均已在追踪列表中，无需重复记录")
 
 
+def _parse_ts(s):
+    """安全解析 ISO 时间/date 字符串，失败返回 None（不抛异常）。"""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def heat_7d_change(item: dict):
+    """从 heat_history 计算 7 天变化率。
+    返回 (rate_or_None, ref_heat, latest_heat, ref_label)：
+    latest = 最新非空热度点；ref = 距 latest 约 7 天前的最近点（无则取最早点）；
+    ref 为 0/空时 rate 为 None。看板 JS 与此同口径。"""
+    hist = [p for p in (item.get("heat_history") or [])
+            if isinstance(p, dict) and p.get("heat") is not None]
+    if len(hist) < 2:
+        latest = hist[-1]["heat"] if hist else item.get("initial_heat")
+        return None, None, latest, None
+    latest_p = hist[-1]
+    latest_heat = latest_p["heat"]
+    latest_ts = _parse_ts(latest_p.get("ts") or latest_p.get("date"))
+    ref_p = hist[0]
+    if latest_ts:
+        target = latest_ts - timedelta(days=7)
+        best = None
+        best_ts = None
+        for p in hist[:-1]:
+            pts = _parse_ts(p.get("ts") or p.get("date"))
+            if not pts or pts > target:
+                continue
+            if best_ts is None or pts > best_ts:
+                best, best_ts = p, pts
+        if best is not None:
+            ref_p = best
+    ref_heat = ref_p["heat"]
+    ref_label = (ref_p.get("ts") or ref_p.get("date") or "")[:10]
+    if not ref_heat:
+        return None, ref_heat, latest_heat, ref_label
+    return (latest_heat - ref_heat) / ref_heat, ref_heat, latest_heat, ref_label
+
+
+def _norm_term(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _gsc_site_property_for_url(url: str):
+    """GSC 资产 URL 必须精确（写错 www 会 403，2026-10-25 教训）。"""
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower()
+    except Exception:
+        return None
+    return {
+        "yuliuswiki.com": "https://yuliuswiki.com/",
+        "www.yuliusbox.com": "https://www.yuliusbox.com/",
+        "yuliusbox.com": "https://www.yuliusbox.com/",
+        "www.heic2jpg-free.com": "https://www.heic2jpg-free.com/",
+        "heic2jpg-free.com": "https://www.heic2jpg-free.com/",
+    }.get(host)
+
+
+def _stored_gsc_impressions_14d(page: dict, now) -> int | None:
+    """page_tracking 里该页已存 gsc 快照在 14 天窗口内的展现和；无快照返回 None。"""
+    rows = page.get("gsc") or []
+    if not rows:
+        return None
+    cutoff = (now - timedelta(days=14)).date().isoformat()
+    total = 0
+    found = False
+    for r in rows:
+        d = (r.get("date") or "")[:10]
+        if d and d >= cutoff:
+            try:
+                total += int(r.get("impressions") or 0)
+            except (TypeError, ValueError):
+                continue
+            found = True
+    return total if found else None
+
+
+def _live_gsc_page_daily(page_url: str):
+    """实时拉该页近 14 天 GSC 按日数据（dimensions=date + page 过滤）。
+    成功返回 [{date, impressions, clicks, position}]；任何失败返回 None
+    （调用方记 pending，绝不造数据）。复用 ~/workspace/gsc-api 的 gsc_client 模式。"""
+    site = _gsc_site_property_for_url(page_url)
+    if not site:
+        return None
+    try:
+        sys.path.insert(0, os.path.expanduser("~/workspace/gsc-api"))
+        import gsc as gsc_client
+        token = gsc_client.get_access_token()
+    except Exception as e:
+        print(f"[命中率核验] GSC 客户端初始化失败: {e}")
+        return None
+    today = datetime.now(timezone.utc).date()
+    end = (today - timedelta(days=2)).isoformat()       # GSC 数据滞后约 2 天
+    start = (today - timedelta(days=16)).isoformat()    # 14 天窗口
+    try:
+        enc = urllib.parse.quote(site, safe="")
+        res = gsc_client.api_post(
+            f"/sites/{enc}/searchAnalytics/query", token,
+            {"startDate": start, "endDate": end,
+             "dimensions": ["date"],
+             "dimensionFilterGroups": [{
+                 "filters": [{"dimension": "page", "operator": "equals", "expression": page_url}]
+             }],
+             "rowLimit": 100},
+        )
+    except Exception as e:
+        print(f"[命中率核验] GSC 拉取失败 ({page_url}): {e}")
+        return None
+    rows = []
+    for r in res.get("rows", []) or []:
+        keys = r.get("keys") or []
+        rows.append({
+            "date": keys[0] if keys else "",
+            "impressions": r.get("impressions", 0),
+            "clicks": r.get("clicks", 0),
+            "position": r.get("position"),
+        })
+    return rows
+
+
+def _append_gsc_snapshots(page_term: str, page_url: str, rows: list):
+    """把实时拉到的按日快照写回 page_tracking（按 date 去重），与手动 gsc 子命令同形状。"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "hidden_files", "page_tracking.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            pages = json.load(f)
+    except Exception:
+        return
+    for p in pages:
+        if p.get("term") == page_term and p.get("topic_url") == page_url:
+            snaps = p.setdefault("gsc", [])
+            have = {(s.get("date") or "")[:10] for s in snaps}
+            for r in rows:
+                if (r.get("date") or "")[:10] and (r.get("date") or "")[:10] not in have:
+                    snaps.append(r)
+            break
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(pages, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[命中率核验] GSC 快照写回失败: {e}")
+
+
+def _hit_page_match_in(term: str, pages: list):
+    """命中率专用的严格页面匹配（比 find_matching_page 严格，避免误归因）：
+    - 规则 1：词 token 序列与页面 term token 序列互相包含（连续子序列）；
+    - 规则 2：词的最长 token（长度 >= 6 且不在通用词表）出现在 topic_url 的 slug 里。
+    反例：'flux-3-image-klein-comfy' 的核心 token 是 'image'（通用词），
+    不能因此匹配到 moss-image-pricing；'FLUX 3 Max Text to Video' 的
+    'video' 同理不能匹配到 ai-video-cost-calculator（计算器页的展现
+    是全站模型共用的，不能归因给单个视频模型）。
+    """
+    generic = {"image", "video", "audio", "model", "models", "free", "online",
+               "tool", "tools", "app", "generator", "editor", "chat", "music", "photo"}
+    low = _norm_term(term)
+    if not low:
+        return None
+    term_tokens = [t for t in re.split(r"[\s\-_]+", low) if t]
+
+    def contains_seq(hay, needle):
+        if not needle or len(needle) > len(hay):
+            return False
+        return any(hay[i:i + len(needle)] == needle for i in range(len(hay) - len(needle) + 1))
+
+    distinctive = [t for t in term_tokens if len(t) >= 6 and t not in generic]
+    core = max(distinctive, key=len) if distinctive else ""
+    for p in pages:
+        pterm = _norm_term(p.get("term") or "")
+        url = (p.get("topic_url") or "").strip().lower()
+        slug = url.rstrip("/").split("/")[-1] if url else ""
+        if not pterm and not slug:
+            continue
+        page_tokens = [t for t in re.split(r"[\s\-_]+", pterm) if t]
+        if page_tokens and (contains_seq(page_tokens, term_tokens) or contains_seq(term_tokens, page_tokens)):
+            return p
+        if core and core in slug:
+            return p
+    return None
+
+
+def _hit_page_match(term: str):
+    """从 page_tracking 里找命中率口径的页面（严格匹配），无匹配返回 None。"""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base_dir, "hidden_files", "page_tracking.json")
+        with open(path, encoding="utf-8") as f:
+            pages = json.load(f)
+    except Exception:
+        return None
+    return _hit_page_match_in(term, pages)
+
+
+def evaluate_tracking_hit(item: dict, now):
+    """新命中定义（2026-10-27 用户定，旧 Google Trends 翻倍标准已废弃）：
+    - 有上线页面（page_tracking 里有记录）：14 天内 GSC 展现数 >= 配置阈值
+     （gsc_hit_impressions_threshold，默认 20）算命中；无 GSC 数据 → pending。
+    - 没做页面的词：热度 7 天增长率，最新热度 >= 7 天前热度 × 配置倍数
+     （hit_heat_growth_multiplier，默认 2.0）算命中；7 天前热度为 0 时最新 >0
+      算命中；历史跨度不足 7 天 → pending。
+    返回 (status, detail)：status ∈ {'hit', 'miss', 'pending'}。"""
+    from trend_config import CONFIG as _CFG
+    gsc_threshold = _CFG.get("gsc_hit_impressions_threshold") or 20
+    multiple = _CFG.get("hit_heat_growth_multiplier") or 2.0
+
+    page = _hit_page_match(item.get("term", ""))
+    if page is not None:
+        impressions = _stored_gsc_impressions_14d(page, now)
+        fetched = False
+        if impressions is None:
+            url = page.get("topic_url") or ""
+            rows = _live_gsc_page_daily(url) if url else None
+            if rows is not None:
+                # 拉取成功（含 0 行 = 0 展现）即算数；只有拉取失败（None）才 pending
+                _append_gsc_snapshots(page.get("term"), url, rows)
+                impressions = sum(int(r.get("impressions") or 0) for r in rows)
+                fetched = True
+        if impressions is None:
+            return "pending", {"basis": "gsc", "reason": "无 GSC 数据（拉取失败或页面未产生展现记录）",
+                               "page_url": page.get("topic_url") or ""}
+        return ("hit" if impressions >= gsc_threshold else "miss",
+                {"basis": "gsc", "impressions_14d": impressions, "threshold": gsc_threshold,
+                 "page_url": page.get("topic_url") or "", "live_fetched": fetched})
+
+    # 无页面：热度 7 天增长率（用 B1 的 heat_7d_change，同口径）
+    hist = [p for p in (item.get("heat_history") or [])
+            if isinstance(p, dict) and p.get("heat") is not None]
+    if len(hist) < 2:
+        return "pending", {"basis": "heat", "reason": "热度历史不足 2 点"}
+    first_ts = _parse_ts(hist[0].get("ts") or hist[0].get("date"))
+    last_ts = _parse_ts(hist[-1].get("ts") or hist[-1].get("date"))
+    if not first_ts or not last_ts or (last_ts - first_ts).total_seconds() < 7 * 86400:
+        return "pending", {"basis": "heat", "reason": "热度历史跨度不足 7 天"}
+    rate, ref, latest, ref_label = heat_7d_change(item)
+    if rate is None:
+        if ref in (0, None) and latest:
+            return "hit", {"basis": "heat", "ref_heat": ref, "latest_heat": latest,
+                           "ref_label": ref_label, "multiple": multiple,
+                           "note": "7 天前热度为 0，最新有热度即算命中"}
+        return "pending", {"basis": "heat", "reason": "无法计算 7 天变化率"}
+    is_hit = latest >= ref * multiple if ref else bool(latest)
+    return ("hit" if is_hit else "miss",
+            {"basis": "heat", "ref_heat": ref, "latest_heat": latest,
+             "ref_label": ref_label, "rate": round(rate, 3), "multiple": multiple})
+
+
 def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
-    """对 14 天前记录的候选词用 Google Trends 查询过去 14 天热度，
-    计算每个信号源的命中率（14 天后热度 > 发现时 × 2 算命中），
-    并输出 hit-rate 报告到 outputs/ 目录下。
+    """新命中率核验（2026-10-27 用户定）：
+    - 有上线页面的词：14 天内 GSC 展现数 >= 阈值（配置 gsc_hit_impressions_threshold=20）算命中；
+    - 没做页面的词：热度 7 天增长率 >= 倍数（配置 hit_heat_growth_multiplier=2.0）算命中；
+    - 命中率按来源和路线分别统计（huggingface、api_platform 全部计入，不再只核验 Trends 词）；
+    - GSC 拉取失败或历史不足时记 pending（不算未命中、不造数据），下轮重试；
+    - 旧 Google Trends 翻倍标准已废弃：不再调用 pytrends，每轮按新定义重算
+      （旧 checked/hit 值以新定义为准刷新）。
+    输出 hit-rate 报告到 outputs/ 目录下。
     """
     print("\n=== 开始执行候选词命中率核验 (check_hit_rate) ===")
+    from trend_config import CONFIG as _CFG
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if tracking_path is None:
         tracking_path = os.path.join(base_dir, "hidden_files", "word_tracking.json")
@@ -2782,162 +3160,131 @@ def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
     # 命中率统计默认排除 legacy 旧条目（已淘汰的 Google Trends 及 HF 泛词）
     active_data = [item for item in tracking_data if not item.get('legacy')]
 
+    definition = {
+        "page_branch": "有上线页面：14 天内 GSC 展现数 >= 阈值算命中",
+        "gsc_threshold": _CFG.get("gsc_hit_impressions_threshold") or 20,
+        "heat_branch": "无页面：热度 7 天增长率 >= 倍数算命中",
+        "heat_multiple": _CFG.get("hit_heat_growth_multiplier") or 2.0,
+        "heat_window_days": _CFG.get("hit_heat_window_days") or 7,
+        "pending_rule": "GSC 拉取失败或热度历史不足 7 天时记 pending，不算未命中",
+    }
+
     if not active_data:
         print(f"[命中率核验] 活跃追踪词库为空，输出初始报告")
         report = {
             "generated_at": now.isoformat(),
+            "definition": definition,
             "summary": "活跃追踪词库为空，暂无数据",
             "overall": {
                 "total_tracked": 0,
                 "total_evaluated": 0,
                 "total_hits": 0,
-                "hit_rate": "0.0%"
+                "hit_rate": "0.0%",
+                "pending": 0,
             },
             "sources": {},
             "paths": {},
-            "evaluated_details": []
+            "evaluated_details": [],
+            "pending_details": [],
         }
         _write_hit_rate_report(output_dir, report)
         return report
 
-    # 筛选出达到 14 天周期的待核验词
-    eval_candidates = []
-    for item in active_data:
-        disc_str = item.get('discovered_at', '')
-        try:
-            disc_dt = datetime.fromisoformat(disc_str)
-            delta_days = (now - disc_dt).total_seconds() / 86400.0
-            if delta_days >= 14:
-                eval_candidates.append(item)
-        except Exception:
-            continue
-
-    print(f"[命中率核验] 当前总追踪词数: {len(active_data)}（已排除 legacy 旧条目 {len(tracking_data) - len(active_data)} 个），达到 14 天周期的词数: {len(eval_candidates)}")
-
-    pt = TrendReq(hl='en-US', tz=360)
-
-    # 对达到 14 天且尚未核验的词通过 Google Trends 验证热度趋势
+    # 按新定义重算全部活跃词（旧 Trends 标准已废弃，不沿用旧 checked 值）
     updated = False
-    for item in eval_candidates:
-        if item.get('checked'):
-            continue
-        # quick_paid_site 不用 Trends 判定,以 page_tracking 第 7 天净收入为准
-        if item.get('monetization_path') == 'quick_paid_site':
-            continue
-
-        term = item.get('term', '')
-        try:
-            time.sleep(1.2)  # 节流避免 Google 429 限流
-            pt.build_payload([term], timeframe='today 1-m', geo='US')
-            df = pt.interest_over_time()
-
-            if not df.empty and term in df.columns:
-                series = df[term].tolist()
-                # 丢弃最近 2 天未结算数据：Trends 数据有延迟，直接用会导致 0→100 假峰值误判
-                if len(series) > 2:
-                    series = series[:-2]
-                # 过去 14 天数据点窗口
-                series_14d = series[-14:] if len(series) >= 14 else series
-                heat_discovery = series_14d[0]
-                heat_14d = series_14d[-1]
-
-                # 命中判定规则：14 天后热度 > 发现时 × 2
-                if heat_discovery > 0:
-                    is_hit = bool(heat_14d > heat_discovery * 2)
-                else:
-                    # 若发现时热度为 0，只要 14 天后有明显热度（>0）即算爆发命中
-                    is_hit = bool(heat_14d > 0)
-
-                item['checked'] = True
-                item['hit'] = is_hit
-                item['heat_at_discovery'] = heat_discovery
-                item['heat_after_14d'] = heat_14d
-                item['check_time'] = now.isoformat()
-                updated = True
-                print(f"[命中率核验] 词 '{term}' 发现时热度: {heat_discovery}, 14天后热度: {heat_14d} -> {'命中' if is_hit else '未命中'}")
-            else:
-                item['checked'] = True
-                item['hit'] = False
-                item['heat_at_discovery'] = 0
-                item['heat_after_14d'] = 0
-                item['check_time'] = now.isoformat()
-                updated = True
-                print(f"[命中率核验] 词 '{term}' 无 Trends 数据，计为未命中")
-        except Exception as e:
-            print(f"[命中率核验] 查询 Google Trends 异常 ({term}): {e}，本次暂不标记")
+    evaluated_details = []
+    pending_details = []
+    for item in active_data:
+        status, detail = evaluate_tracking_hit(item, now)
+        if status == "pending":
+            item['checked'] = False
+            item['hit'] = None
+            item['hit_status'] = 'pending'
+            item['pending_reason'] = detail.get('reason', '')
+            pending_details.append({
+                "term": item.get('term'),
+                "source": item.get('source'),
+                "monetization_path": item.get('monetization_path'),
+                "discovered_at": item.get('discovered_at'),
+                "basis": detail.get('basis'),
+                "reason": detail.get('reason', ''),
+            })
+            print(f"[命中率核验] 词 '{item.get('term')}' pending（{detail.get('basis')}）：{detail.get('reason', '')}")
+        else:
+            item['checked'] = True
+            item['hit'] = (status == 'hit')
+            item['hit_status'] = status
+            item['hit_basis'] = detail.get('basis')
+            item['hit_detail'] = detail
+            item['check_time'] = now.isoformat()
+            evaluated_details.append({
+                "term": item.get('term'),
+                "source": item.get('source'),
+                "monetization_path": item.get('monetization_path'),
+                "discovered_at": item.get('discovered_at'),
+                "hit": item['hit'],
+                "basis": detail.get('basis'),
+                "detail": detail,
+                "check_time": item['check_time'],
+            })
+            print(f"[命中率核验] 词 '{item.get('term')}'（{detail.get('basis')}）-> {'命中' if item['hit'] else '未命中'}：{detail}")
+        updated = True
 
     if updated:
         save_tracking_data(tracking_path, tracking_data)
 
-    # 统计各信号源命中率（默认排除 legacy 旧条目）
+    # 按来源统计（只计已评估的 hit/miss，pending 不计入分母）
     source_stats = {}
     total_evaluated = 0
     total_hits = 0
-
     for item in active_data:
         if not item.get('checked'):
             continue
         src = item.get('source', 'unknown')
-        if src not in source_stats:
-            source_stats[src] = {'total': 0, 'hits': 0}
-        source_stats[src]['total'] += 1
+        st = source_stats.setdefault(src, {'total': 0, 'hits': 0})
+        st['total'] += 1
         total_evaluated += 1
         if item.get('hit'):
-            source_stats[src]['hits'] += 1
+            st['hits'] += 1
             total_hits += 1
-
     for src, st in source_stats.items():
         st['hit_rate'] = f"{(st['hits'] / st['total'] * 100):.1f}%" if st['total'] > 0 else "0.0%"
 
-    # 按变现路线统计:content / tool_page 沿用 Trends 标准;quick_paid_site
-    # 不用 Trends 判定,标注以 page_tracking 第 7 天净收入为准;旧记录无路线记 legacy
+    # 按变现路线统计（同口径）
     path_stats = {}
     for item in active_data:
         p = item.get('monetization_path') or 'legacy'
-        if p not in path_stats:
-            path_stats[p] = {'total': 0, 'hits': 0, 'tracked': 0}
-        path_stats[p]['tracked'] += 1
-        if p == 'quick_paid_site' or not item.get('checked'):
+        st = path_stats.setdefault(p, {'total': 0, 'hits': 0, 'tracked': 0})
+        st['tracked'] += 1
+        if not item.get('checked'):
             continue
-        path_stats[p]['total'] += 1
+        st['total'] += 1
         if item.get('hit'):
-            path_stats[p]['hits'] += 1
+            st['hits'] += 1
     for p, st in path_stats.items():
-        if p == 'quick_paid_site':
-            st['hit_rate'] = None
-            st['standard'] = '以 page_tracking 第 7 天净收入为准'
-        else:
-            st['hit_rate'] = f"{(st['hits'] / st['total'] * 100):.1f}%" if st['total'] > 0 else "0.0%"
+        st['hit_rate'] = f"{(st['hits'] / st['total'] * 100):.1f}%" if st['total'] > 0 else "0.0%"
 
     overall_rate = f"{(total_hits / total_evaluated * 100):.1f}%" if total_evaluated > 0 else "0.0%"
 
     report = {
         "generated_at": now.isoformat(),
+        "definition": definition,
         "overall": {
             "total_tracked": len(active_data),
             "total_evaluated": total_evaluated,
             "total_hits": total_hits,
-            "hit_rate": overall_rate
+            "hit_rate": overall_rate,
+            "pending": len(pending_details),
         },
         "sources": source_stats,
         "paths": path_stats,
-        "evaluated_details": [
-            {
-                "term": it.get('term'),
-                "source": it.get('source'),
-                "monetization_path": it.get('monetization_path'),
-                "discovered_at": it.get('discovered_at'),
-                "heat_at_discovery": it.get('heat_at_discovery'),
-                "heat_after_14d": it.get('heat_after_14d'),
-                "hit": it.get('hit'),
-                "check_time": it.get('check_time')
-            }
-            for it in active_data if it.get('checked')
-        ]
+        "evaluated_details": evaluated_details,
+        "pending_details": pending_details,
     }
 
     _write_hit_rate_report(output_dir, report)
-    print(f"[命中率核验] 核验完成：总评估 {total_evaluated} 词，命中 {total_hits} 词，总体命中率 {overall_rate}")
+    print(f"[命中率核验] 核验完成：总评估 {total_evaluated} 词，命中 {total_hits} 词，"
+          f"总体命中率 {overall_rate}，pending {len(pending_details)} 词")
     return report
 
 
@@ -2951,12 +3298,17 @@ def _write_hit_rate_report(output_dir: str, report: dict):
         json.dump(report, f, ensure_ascii=False, indent=2)
 
     # 2. 写入 Markdown
+    definition = report.get('definition', {})
     md_lines = [
-        "# 候选词 14 天命中率追踪报告 (Hit Rate Report)",
+        "# 候选词命中率追踪报告 (Hit Rate Report)",
         f"- **生成时间**: {report.get('generated_at')}",
+        f"- **命中定义**: 有页面 → 14 天内 GSC 展现 >= {definition.get('gsc_threshold', 20)}；"
+        f"无页面 → 7 天热度增长率 >= {definition.get('heat_multiple', 2.0)} 倍"
+        f"（{definition.get('pending_rule', '数据不足记 pending，不算未命中')}）",
         f"- **总追踪候选词数**: {report['overall']['total_tracked']}",
-        f"- **已完成 14 天核验词数**: {report['overall']['total_evaluated']}",
+        f"- **已评估词数**: {report['overall']['total_evaluated']}",
         f"- **总体命中率**: {report['overall']['hit_rate']} ({report['overall']['total_hits']} / {report['overall']['total_evaluated']})",
+        f"- **pending（未计入分母）**: {report['overall'].get('pending', 0)}",
         "",
         "## 各信号源命中率统计",
         "| 信号源 (Source) | 评估总数 (Total) | 命中数 (Hits) | 命中率 (Hit Rate) |",
@@ -2983,19 +3335,38 @@ def _write_hit_rate_report(output_dir: str, report: dict):
         md_lines.append("暂无数据")
 
     md_lines.append("")
-    md_lines.append("## 已核验词详情")
+    md_lines.append("## 已评估词详情")
     details = report.get('evaluated_details', [])
     if details:
-        md_lines.append("| 关键词 (Term) | 信号源 | 发现时间 | 发现时热度 | 14天后热度 | 命中状态 |")
+        md_lines.append("| 关键词 (Term) | 信号源 | 发现时间 | 判定依据 | 详情 | 命中状态 |")
         md_lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
         for d in details:
             status_str = "✅ 命中" if d.get('hit') else "❌ 未命中"
+            det = d.get('detail') or {}
+            if d.get('basis') == 'gsc':
+                det_str = f"14 天展现 {det.get('impressions_14d')}（阈值 {det.get('threshold')}）"
+            else:
+                det_str = f"7 天热度 {det.get('ref_heat')} → {det.get('latest_heat')}（{det.get('rate')} 倍率，阈值 {det.get('multiple')} 倍）"
             md_lines.append(
                 f"| `{d.get('term')}` | `{d.get('source')}` | {d.get('discovered_at', '')[:10]} | "
-                f"{d.get('heat_at_discovery')} | {d.get('heat_after_14d')} | {status_str} |"
+                f"{d.get('basis')} | {det_str} | {status_str} |"
             )
     else:
-        md_lines.append("暂无已完成 14 天周期的关键词详情。")
+        md_lines.append("暂无已评估关键词详情。")
+
+    md_lines.append("")
+    md_lines.append("## pending 详情（不计入命中率分母，下轮重试）")
+    pending = report.get('pending_details', [])
+    if pending:
+        md_lines.append("| 关键词 (Term) | 信号源 | 发现时间 | 判定依据 | 原因 |")
+        md_lines.append("| :--- | :--- | :--- | :--- | :--- |")
+        for d in pending:
+            md_lines.append(
+                f"| `{d.get('term')}` | `{d.get('source')}` | {d.get('discovered_at', '')[:10]} | "
+                f"{d.get('basis')} | {d.get('reason', '')} |"
+            )
+    else:
+        md_lines.append("无 pending。")
 
     with open(md_path, 'w', encoding='utf-8') as f:
         f.write("\n".join(md_lines) + "\n")
@@ -3054,6 +3425,15 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
 
         for it in all_models:
             term = it.get('term', '')
+            # 前置过滤：敏感词与衍生模型不推送（与主流程同口径）
+            sens_hit, sens_word = is_sensitive(term)
+            if sens_hit:
+                print(f"[Fast敏感过滤] 跳过: {term}（命中 {sens_word}）")
+                continue
+            deriv = classify_derivative(term)
+            if deriv:
+                print(f"[Fast衍生过滤] 跳过: {term}（event_type={deriv}，默认不推送）")
+                continue
             valid, _ = check_candidate(term, it.get('note', ''))
             if not valid:
                 continue
@@ -3116,7 +3496,7 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
             url = m.get('source_url')
             if url and not entry.get('project_url'):
                 entry['project_url'] = url
-            entry['last_heat'] = parse_heat(m.get('heat', 80))
+            entry['last_heat'], entry['heat_source'] = normalize_heat(m.get('heat'))
             entry['last_notified_at'] = now_bj_iso
             entry['last_notified_reason'] = 'fast_official_model'
 
@@ -3136,6 +3516,31 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
 # ---------------------------------------------------------------------------
 # 主流程与文件输出
 # ---------------------------------------------------------------------------
+def prefilter_candidates(candidates: list):
+    """Jev 打分前的前置过滤（B5/B6）：敏感词与衍生模型直接过滤，不输出、不推送。
+    返回 (kept, filtered)：filtered 项为 (candidate, reason)。
+    衍生模型同时标 event_type=derivative/version_bump。"""
+    kept = []
+    filtered = []
+    for c in candidates:
+        term_c = c.get('term', '')
+        sens_hit, sens_word = is_sensitive(term_c)
+        if sens_hit:
+            print(f"[敏感过滤] 丢弃: {term_c}（命中 {sens_word}）")
+            filtered.append((c, f"sensitive: {sens_word}"))
+            continue
+        deriv = classify_derivative(term_c)
+        if deriv:
+            c['event_type'] = deriv
+            print(f"[衍生过滤] 丢弃: {term_c}（event_type={deriv}，默认不推送）")
+            filtered.append((c, f"derivative_or_version_bump: {deriv}"))
+            continue
+        kept.append(c)
+    if len(kept) != len(candidates):
+        print(f"[前置过滤] {len(candidates)} -> {len(kept)}")
+    return kept, filtered
+
+
 def main(dry_run: bool = False):
     with ConcurrencyLock():
         _main_locked(dry_run=dry_run)
@@ -3237,9 +3642,10 @@ def _main_locked(dry_run: bool = False):
             entry.setdefault('sources', []).append(src)
         if project_url and not entry.get('project_url'):
             entry['project_url'] = project_url
-        cur_heat = parse_heat(item.get('heat', 0))
-        if cur_heat:
-            entry['last_heat'] = cur_heat
+        cur_heat, cur_heat_source = normalize_heat(item.get('heat'))
+        # 没有热度就记 null + heat_source=none，不残留旧值、不写死数字
+        entry['last_heat'] = cur_heat
+        entry['heat_source'] = cur_heat_source
         _maj, _ver = extract_version(f"{term} {item.get('note', '')}")
         if _ver:
             entry['last_version'] = _ver
@@ -3253,6 +3659,10 @@ def _main_locked(dry_run: bool = False):
         item['_notify_reason'] = reason
         output_candidates.append(item)
 
+    # 前置过滤（Jev 打分前，省 API 调用）：敏感词与衍生模型直接进 filtered_items
+    output_candidates, filtered_items = prefilter_candidates(output_candidates)
+
+
     # Jev 打分层: 给 top 候选词加结构化评分(失败不阻塞)
     jev_stats = {'provider': JEV_PROVIDER, 'attempted': 0, 'succeeded': 0, 'failed': 0, 'cached': 0}
     try:
@@ -3264,7 +3674,6 @@ def _main_locked(dry_run: bool = False):
     # (yuliuswiki 只做产品技术类词；无评分的不拦截，避免 Jev 失败时误杀)
     # 被丢弃的词收集到 filtered_items,输出写成功后写 last_filtered_*(不算推送)
     kept = []
-    filtered_items = []
     for c in output_candidates:
         j = c.get('jev') or {}
         pt = j.get('is_product_tech')
@@ -3348,7 +3757,10 @@ def _main_locked(dry_run: bool = False):
         save_seen_terms(seen_path, seen)
 
         # 命中率追踪：记录新发现候选词至 hidden_files/word_tracking.json
+        # （输出词新建条目；过滤项只给已追踪词追加本轮热度点，不新建条目，
+        # 这样 14 天窗口内的词每轮都有 (term, ts, heat) 历史点）
         record_discovered_terms(out_items, tracking_path, now_bj_iso)
+        record_discovered_terms(filtered_items, tracking_path, now_bj_iso, create_new=False)
 
         # 机会看板：记录新发现候选词至 outputs/opportunities.json (status=new)
         try:

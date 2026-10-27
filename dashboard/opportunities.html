@@ -30,7 +30,7 @@
 
   .card { background: #1a2133; border-radius: 10px; padding: 14px; margin-bottom: 16px; border: 1px solid #232b3d; overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 800px; }
-  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #232b3d; vertical-align: top; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #232b3d; vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }
   th { color: #8b93a7; font-weight: 500; white-space: nowrap; }
   tr:hover { background: #1f273d; }
 
@@ -50,7 +50,9 @@
 
   .src-link { color: #5ea3f0; text-decoration: none; word-break: break-all; }
   .src-link:hover { text-decoration: underline; }
-  .notes { color: #8b93a7; font-size: 12px; margin-top: 4px; max-width: 260px; line-height: 1.4; }
+  .notes { color: #8b93a7; font-size: 12px; margin-top: 4px; max-width: 260px; line-height: 1.4; overflow-wrap: anywhere; word-break: break-word; }
+  .term-cell { overflow-wrap: anywhere; word-break: break-word; }
+  .variant-tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 12px; background: #2b1f3d; color: #c45ef0; margin-left: 4px; white-space: nowrap; }
   .overdue-tag { color: #f05e5e; font-size: 11px; font-weight: 600; margin-left: 4px; }
   .loading { text-align: center; padding: 40px; color: #8b93a7; }
 </style>
@@ -80,6 +82,7 @@
     <button class="v-btn" data-view="review">已上线待复盘 (Review)</button>
   </div>
   <div class="status-filter">
+    <label><input type="checkbox" id="showDropped" style="margin-right:4px;">显示已放弃</label>
     <label for="statusSelect">按状态筛选:</label>
     <select id="statusSelect">
       <option value="all">全部状态</option>
@@ -120,6 +123,7 @@
 let allOpps = [];
 let currentView = 'all';
 let currentStatus = 'all';
+let showDropped = false;
 
 async function loadData() {
   try {
@@ -166,6 +170,9 @@ function getFilteredData() {
   const todayStr = now.toISOString().slice(0, 10);
 
   return allOpps.filter(o => {
+    // 0. 默认隐藏 dropped：勾选“显示已放弃”或状态下拉框显式选 dropped 时才显示
+    if ((o.status || '').toLowerCase() === 'dropped' && !showDropped && currentStatus !== 'dropped') return false;
+
     // 1. Built-in view filter
     if (currentView === 'pending') {
       if (!((o.status === 'new' || o.status === 'evaluating') && !o.decision)) return false;
@@ -215,9 +222,11 @@ function renderTable() {
 
     const decOut = [o.decision ? `决策: ${o.decision}` : '', o.outcome ? `结局: ${o.outcome}` : ''].filter(Boolean).join('<br>') || '<span style="color:#8b93a7">—</span>';
     const notesText = [o.notes, o.drop_reason ? `放弃: ${o.drop_reason}` : ''].filter(Boolean).join('；');
+    const variantTag = (o.variants && o.variants.length)
+      ? `<span class="variant-tag" title="${o.variants.map(v => v.term).join('、')}">🔀 ${o.variants.length} 变体</span>` : '';
 
     return `<tr>
-      <td><strong>${o.term}</strong>${isOverdue ? '<span class="overdue-tag">⚠️>48h</span>' : ''}</td>
+      <td class="term-cell"><strong>${o.term}</strong>${variantTag}${isOverdue ? '<span class="overdue-tag">⚠️>48h</span>' : ''}</td>
       <td><span class="badge st-${st}">${st}</span></td>
       <td><span class="${routeClass(o.suggested_route)}">${o.suggested_route || 'ignore'}</span></td>
       <td>${o.score != null ? o.score : '-'}</td>
@@ -243,6 +252,11 @@ document.querySelectorAll('.v-btn').forEach(btn => {
 
 document.getElementById('statusSelect').addEventListener('change', (e) => {
   currentStatus = e.target.value;
+  renderTable();
+});
+
+document.getElementById('showDropped').addEventListener('change', (e) => {
+  showDropped = e.target.checked;
   renderTable();
 });
 

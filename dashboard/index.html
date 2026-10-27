@@ -78,24 +78,52 @@ function srcLink(c) {
 }
 function spark(hist) {
   if (!hist || !hist.length) return '<span style="color:#8b93a7">—</span>';
-  const validHeats = hist.map(h => (h.heat != null ? h.heat : 0));
-  const max = Math.max(...validHeats, 1);
-  const bars = hist.map(h => {
-    const val = h.heat != null ? h.heat : 0;
-    const pct = Math.max(6, Math.round(val / max * 100));
-    const title = h.heat != null ? `${h.date}: 热度 ${h.heat}` : `${h.date}: 热度 —`;
-    return `<div class="sbar" style="height:${pct}%" title="${title}"></div>`;
+  const pts = hist.map((h, i) => ({ i, heat: h.heat, label: (h.ts || h.date || '').slice(0, 10) }))
+    .filter(p => p.heat != null);
+  const title = hist.map(h => `${(h.ts || h.date || '').slice(0, 10)}: 热度 ${h.heat != null ? h.heat : '—'}`).join(' | ');
+  if (pts.length < 2) {
+    const v = pts.length ? pts[0].heat : '—';
+    return `<span title="${title}">${v}</span>`;
+  }
+  const W = 120, H = 28, PAD = 2;
+  const max = Math.max(...pts.map(p => p.heat), 1);
+  const min = Math.min(...pts.map(p => p.heat), 0);
+  const span = (max - min) || 1;
+  const xy = pts.map(p => {
+    const x = pts.length > 1 ? PAD + p.i / (hist.length - 1) * (W - 2 * PAD) : W / 2;
+    const y = H - PAD - (p.heat - min) / span * (H - 2 * PAD);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const dots = pts.map(p => {
+    const x = pts.length > 1 ? PAD + p.i / (hist.length - 1) * (W - 2 * PAD) : W / 2;
+    const y = H - PAD - (p.heat - min) / span * (H - 2 * PAD);
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2" fill="#f0a35e"/>`;
   }).join('');
-  return `<div class="spark">${bars}</div>`;
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" title="${title}"><polyline points="${xy}" fill="none" stroke="#f0a35e" stroke-width="1.5"/>${dots}</svg>`;
 }
 function trendArrow(hist) {
-  if (!hist || hist.length < 2) return '<span style="color:#8b93a7">—</span>';
-  const a = hist[0].heat != null ? hist[0].heat : 0;
-  const b = hist[hist.length - 1].heat != null ? hist[hist.length - 1].heat : 0;
-  if (a <= 0) return '<span style="color:#8b93a7">—</span>';
-  if (b >= a * 1.2) return '<span style="color:#5ef0a3">▲ 升温</span>';
-  if (b <= a * 0.8) return '<span style="color:#f05e5e">▼ 降温</span>';
-  return '<span style="color:#8b93a7">— 平稳</span>';
+  // 7 天变化率：最新非空点 vs 约 7 天前的最近点（无则取最早点），与 Python heat_7d_change 同口径
+  if (!hist || !hist.length) return '<span style="color:#8b93a7">—</span>';
+  const valid = hist.filter(h => h.heat != null);
+  if (valid.length < 2) return '<span style="color:#8b93a7">—</span>';
+  const latest = valid[valid.length - 1];
+  const latestTs = Date.parse(latest.ts || latest.date || '');
+  let ref = valid[0];
+  if (!isNaN(latestTs)) {
+    const target = latestTs - 7 * 24 * 3600 * 1000;
+    for (const p of valid.slice(0, -1)) {
+      const t = Date.parse(p.ts || p.date || '');
+      if (!isNaN(t) && t <= target) ref = p;
+    }
+  }
+  if (!ref.heat) return '<span style="color:#8b93a7">—</span>';
+  const rate = (latest.heat - ref.heat) / ref.heat;
+  const pct = (rate >= 0 ? '+' : '') + Math.round(rate * 100) + '%';
+  const refLabel = (ref.ts || ref.date || '').slice(0, 10);
+  const title = `vs ${refLabel}（${ref.heat} → ${latest.heat}）`;
+  if (rate >= 0.2) return `<span style="color:#5ef0a3" title="${title}">▲ ${pct}</span>`;
+  if (rate <= -0.2) return `<span style="color:#f05e5e" title="${title}">▼ ${pct}</span>`;
+  return `<span style="color:#8b93a7" title="${title}">— ${pct}</span>`;
 }
 function verdict(c) {
   const p = c.monetization_path;
@@ -178,7 +206,7 @@ function verdict(c) {
       const tb = document.getElementById('tracking');
       const pending = (tracking || []).filter(t => !t.checked && (showLegacy || !t.legacy));
       tb.innerHTML = pending.length
-        ? `<div class="card"><table><tr><th>词</th><th>来源</th><th>首次发现</th><th>热度走势</th><th>当前热度</th><th>趋势</th></tr>` +
+        ? `<div class="card"><table><tr><th>词</th><th>来源</th><th>首次发现</th><th>热度走势</th><th>当前热度</th><th>趋势（7天变化）</th></tr>` +
           pending.map(t => {
             const hist = t.heat_history || [];
             const cur = hist.length ? hist[hist.length - 1].heat : (t.initial_heat != null ? t.initial_heat : null);
