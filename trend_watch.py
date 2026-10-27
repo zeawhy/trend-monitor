@@ -2714,9 +2714,15 @@ def save_tracking_data(path: str, data: list):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso: str):
+def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso: str,
+                            create_new: bool = True):
     """将新发现的候选词追加写入 hidden_files/word_tracking.json；
-    已在追踪中的词追加本轮热度到 heat_history（按天去重），并补 source_url。"""
+    已在追踪中的词每轮追加一个热度点 (term, ts, heat) 到 heat_history。
+    注意：旧逻辑按天去重（同一天多轮只记 1 点）且只对再次进入输出的词追加，
+    导致 82/85 条追踪只有 1 个点、看板“热度走势/趋势”全空；新逻辑每轮都记点
+    （保留 date 字段兼容旧看板，新增 ts 字段做 7 天变化率计算），
+    heat_history 上限 200 点（6 小时一轮约覆盖 50 天，14 天窗口绰绰有余）。
+    create_new=False 时只给已追踪词追加热度点，不新建条目（供过滤项复用）。"""
     tracking_data = load_tracking_data(tracking_path)
     existing = {}
     for item in tracking_data:
@@ -2734,12 +2740,14 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
         heat = parse_heat(raw_heat) if raw_heat is not None else None
         url = c.get('source_url', '')
         if key not in existing:
+            if not create_new:
+                continue
             item = {
                 "term": term,
                 "discovered_at": timestamp_iso,
                 "source": source,
                 "initial_heat": heat,
-                "heat_history": [{"date": day, "heat": heat}],
+                "heat_history": [{"date": day, "ts": timestamp_iso, "heat": heat}],
                 "source_url": url,
                 "monetization_path": c.get('monetization_path'),
                 "checked": False,
@@ -2755,12 +2763,18 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
             if not item.get("heat_history"):
                 item["heat_history"] = [{
                     "date": (item.get("discovered_at") or timestamp_iso)[:10],
+                    "ts": item.get("discovered_at") or timestamp_iso,
                     "heat": item.get("initial_heat"),
                 }]
             hist = item["heat_history"]
-            if not hist or hist[-1].get("date") != day:
-                hist.append({"date": day, "heat": heat})
-                changed = True
+            # 每轮都记点（不再按天去重），并补齐旧点的 ts
+            for p in hist:
+                if isinstance(p, dict) and not p.get("ts") and p.get("date"):
+                    p["ts"] = p["date"] + "T00:00:00+08:00"
+            hist.append({"date": day, "ts": timestamp_iso, "heat": heat})
+            if len(hist) > 200:
+                del hist[:-200]
+            changed = True
             if url and not item.get("source_url"):
                 item["source_url"] = url
                 changed = True
@@ -2774,6 +2788,49 @@ def record_discovered_terms(candidates: list, tracking_path: str, timestamp_iso:
         print(f"[命中率追踪] 已记录 {new_count} 个新候选词至 {tracking_path}")
     else:
         print(f"[命中率追踪] 本批次候选词均已在追踪列表中，无需重复记录")
+
+
+def _parse_ts(s):
+    """安全解析 ISO 时间/date 字符串，失败返回 None（不抛异常）。"""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def heat_7d_change(item: dict):
+    """从 heat_history 计算 7 天变化率。
+    返回 (rate_or_None, ref_heat, latest_heat, ref_label)：
+    latest = 最新非空热度点；ref = 距 latest 约 7 天前的最近点（无则取最早点）；
+    ref 为 0/空时 rate 为 None。看板 JS 与此同口径。"""
+    hist = [p for p in (item.get("heat_history") or [])
+            if isinstance(p, dict) and p.get("heat") is not None]
+    if len(hist) < 2:
+        latest = hist[-1]["heat"] if hist else item.get("initial_heat")
+        return None, None, latest, None
+    latest_p = hist[-1]
+    latest_heat = latest_p["heat"]
+    latest_ts = _parse_ts(latest_p.get("ts") or latest_p.get("date"))
+    ref_p = hist[0]
+    if latest_ts:
+        target = latest_ts - timedelta(days=7)
+        best = None
+        best_ts = None
+        for p in hist[:-1]:
+            pts = _parse_ts(p.get("ts") or p.get("date"))
+            if not pts or pts > target:
+                continue
+            if best_ts is None or pts > best_ts:
+                best, best_ts = p, pts
+        if best is not None:
+            ref_p = best
+    ref_heat = ref_p["heat"]
+    ref_label = (ref_p.get("ts") or ref_p.get("date") or "")[:10]
+    if not ref_heat:
+        return None, ref_heat, latest_heat, ref_label
+    return (latest_heat - ref_heat) / ref_heat, ref_heat, latest_heat, ref_label
 
 
 def check_hit_rate(tracking_path: str = None, output_dir: str = None) -> dict:
@@ -3372,7 +3429,10 @@ def _main_locked(dry_run: bool = False):
         save_seen_terms(seen_path, seen)
 
         # 命中率追踪：记录新发现候选词至 hidden_files/word_tracking.json
+        # （输出词新建条目；过滤项只给已追踪词追加本轮热度点，不新建条目，
+        # 这样 14 天窗口内的词每轮都有 (term, ts, heat) 历史点）
         record_discovered_terms(out_items, tracking_path, now_bj_iso)
+        record_discovered_terms(filtered_items, tracking_path, now_bj_iso, create_new=False)
 
         # 机会看板：记录新发现候选词至 outputs/opportunities.json (status=new)
         try:
