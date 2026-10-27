@@ -46,6 +46,12 @@ except ImportError:
     TrendReq = None
 from huggingface_hub import HfApi
 from lock_utils import ConcurrencyLock
+from trend_config import (
+    classify_derivative,
+    is_sensitive,
+    normalize_heat,
+    quick_site_downgrade,
+)
 
 # ---------------------------------------------------------------------------
 # Monkey-patch pytrends TrendReq 以适应 Google Trends 最新的 API 变动
@@ -1373,6 +1379,12 @@ def classify_monetization(item: dict) -> tuple:
         or _is_media_category(item.get('pipeline_tag') or '')
     )
     if (item.get('event_type') == 'new_model' or is_media) and item.get('api_available'):
+        # B7 快站降级门：官方已有免费入口 / 开放权重 / 图片单价过高 /
+        # 品牌已成熟（HeyGen、Kling 等）任一满足即降级为 content，并写明原因；
+        # 字段缺失跳过该条（不臆测，尤其不默认 fal 自带 playground 就降级）
+        downgrade, reason = quick_site_downgrade(item)
+        if downgrade:
+            return 'content', f'快站降级为内容：{reason}'
         return 'quick_paid_site', '抢 48 小时窗口：积分制付费站（媒体生成新模型且 API 可用）'
     # 2. 工具/付费意图 → yuliusbox 工具页
     if item.get('intent') == 'tool' or jev.get('intent') in ('paid_tool', 'media_generation'):
@@ -1871,13 +1883,17 @@ def fetch_github_breakout(seen: dict = None):
 # 数据源 5: GSC "第一次有展现" 新词 (Google Search Console Search Analytics)
 # ---------------------------------------------------------------------------
 def check_gsc_sensitive(term: str) -> tuple:
-    """敏感词检查：命中 SENSITIVE_TERMS 则返回 (True, 命中的词)，否则 (False, '')。
-    命中者 suggested_route=ignore、不推送，drop_reason=sensitive。"""
-    low = term.strip().lower()
-    for s in SENSITIVE_TERMS:
-        if s.lower() in low:
-            return True, s
-    return False, ""
+    """敏感词检查：命中配置化敏感词表则返回 (True, 命中的词)，否则 (False, '')。
+    命中者 suggested_route=ignore、不推送，drop_reason=sensitive。
+    词表唯一来源是 trend_config（config.json 可调），本地 SENSITIVE_TERMS 仅作回退。"""
+    try:
+        return is_sensitive(term)
+    except Exception:
+        low = term.strip().lower()
+        for s in SENSITIVE_TERMS:
+            if s.lower() in low:
+                return True, s
+        return False, ""
 
 
 def find_matching_page(term: str):
@@ -3360,6 +3376,15 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
 
         for it in all_models:
             term = it.get('term', '')
+            # 前置过滤：敏感词与衍生模型不推送（与主流程同口径）
+            sens_hit, sens_word = is_sensitive(term)
+            if sens_hit:
+                print(f"[Fast敏感过滤] 跳过: {term}（命中 {sens_word}）")
+                continue
+            deriv = classify_derivative(term)
+            if deriv:
+                print(f"[Fast衍生过滤] 跳过: {term}（event_type={deriv}，默认不推送）")
+                continue
             valid, _ = check_candidate(term, it.get('note', ''))
             if not valid:
                 continue
@@ -3422,7 +3447,7 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
             url = m.get('source_url')
             if url and not entry.get('project_url'):
                 entry['project_url'] = url
-            entry['last_heat'] = parse_heat(m.get('heat', 80))
+            entry['last_heat'], entry['heat_source'] = normalize_heat(m.get('heat'))
             entry['last_notified_at'] = now_bj_iso
             entry['last_notified_reason'] = 'fast_official_model'
 
@@ -3442,6 +3467,31 @@ def run_fast(dry_run: bool = False, limit: int = API_PLATFORM_MAX_RESULTS, outpu
 # ---------------------------------------------------------------------------
 # 主流程与文件输出
 # ---------------------------------------------------------------------------
+def prefilter_candidates(candidates: list):
+    """Jev 打分前的前置过滤（B5/B6）：敏感词与衍生模型直接过滤，不输出、不推送。
+    返回 (kept, filtered)：filtered 项为 (candidate, reason)。
+    衍生模型同时标 event_type=derivative/version_bump。"""
+    kept = []
+    filtered = []
+    for c in candidates:
+        term_c = c.get('term', '')
+        sens_hit, sens_word = is_sensitive(term_c)
+        if sens_hit:
+            print(f"[敏感过滤] 丢弃: {term_c}（命中 {sens_word}）")
+            filtered.append((c, f"sensitive: {sens_word}"))
+            continue
+        deriv = classify_derivative(term_c)
+        if deriv:
+            c['event_type'] = deriv
+            print(f"[衍生过滤] 丢弃: {term_c}（event_type={deriv}，默认不推送）")
+            filtered.append((c, f"derivative_or_version_bump: {deriv}"))
+            continue
+        kept.append(c)
+    if len(kept) != len(candidates):
+        print(f"[前置过滤] {len(candidates)} -> {len(kept)}")
+    return kept, filtered
+
+
 def main(dry_run: bool = False):
     with ConcurrencyLock():
         _main_locked(dry_run=dry_run)
@@ -3543,9 +3593,10 @@ def _main_locked(dry_run: bool = False):
             entry.setdefault('sources', []).append(src)
         if project_url and not entry.get('project_url'):
             entry['project_url'] = project_url
-        cur_heat = parse_heat(item.get('heat', 0))
-        if cur_heat:
-            entry['last_heat'] = cur_heat
+        cur_heat, cur_heat_source = normalize_heat(item.get('heat'))
+        # 没有热度就记 null + heat_source=none，不残留旧值、不写死数字
+        entry['last_heat'] = cur_heat
+        entry['heat_source'] = cur_heat_source
         _maj, _ver = extract_version(f"{term} {item.get('note', '')}")
         if _ver:
             entry['last_version'] = _ver
@@ -3559,6 +3610,10 @@ def _main_locked(dry_run: bool = False):
         item['_notify_reason'] = reason
         output_candidates.append(item)
 
+    # 前置过滤（Jev 打分前，省 API 调用）：敏感词与衍生模型直接进 filtered_items
+    output_candidates, filtered_items = prefilter_candidates(output_candidates)
+
+
     # Jev 打分层: 给 top 候选词加结构化评分(失败不阻塞)
     jev_stats = {'provider': JEV_PROVIDER, 'attempted': 0, 'succeeded': 0, 'failed': 0, 'cached': 0}
     try:
@@ -3570,7 +3625,6 @@ def _main_locked(dry_run: bool = False):
     # (yuliuswiki 只做产品技术类词；无评分的不拦截，避免 Jev 失败时误杀)
     # 被丢弃的词收集到 filtered_items,输出写成功后写 last_filtered_*(不算推送)
     kept = []
-    filtered_items = []
     for c in output_candidates:
         j = c.get('jev') or {}
         pt = j.get('is_product_tech')

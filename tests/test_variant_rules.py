@@ -140,3 +140,41 @@ class TestQuickSiteDowngrade(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPrefilterAndClassify(unittest.TestCase):
+    """B5/B6 前置过滤与 B7 快站降级门（主流程级）。"""
+
+    def test_prefilter_sensitive_and_derivative(self):
+        import trend_watch as tw
+        kept, filt = tw.prefilter_candidates([
+            {"term": "FLUX 3 Klein"},
+            {"term": "qwen21 nsfw pose skill"},
+            {"term": "llama-3-gguf"},
+            {"term": "flux-klein-1017"},
+        ])
+        self.assertEqual([c["term"] for c in kept], ["FLUX 3 Klein"])
+        by_term = {c["term"]: r for c, r in filt}
+        self.assertIn("sensitive", by_term["qwen21 nsfw pose skill"])
+        self.assertIn("derivative", by_term["llama-3-gguf"])
+        self.assertIn("version_bump", by_term["flux-klein-1017"])
+        # 衍生模型标了 event_type
+        deriv = next(c for c, _r in filt if c["term"] == "llama-3-gguf")
+        self.assertEqual(deriv["event_type"], "derivative")
+
+    def test_classify_mature_brand_downgraded(self):
+        import trend_watch as tw
+        path, reason = tw.classify_monetization(
+            {"term": "HeyGen Video", "source": "api_platform",
+             "event_type": "new_model", "api_available": True})
+        self.assertEqual(path, "content")
+        self.assertIn("已成熟", reason)
+
+    def test_classify_klein_not_downgraded(self):
+        import trend_watch as tw
+        path, _reason = tw.classify_monetization(
+            {"term": "FLUX 3 Klein", "source": "api_platform",
+             "event_type": "new_model", "api_available": True,
+             "license": "FLUX Kommunity Licence",
+             "pipeline_tag": "image_generation", "unit_price": 0.009})
+        self.assertEqual(path, "quick_paid_site")
