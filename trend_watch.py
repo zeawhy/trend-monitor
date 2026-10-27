@@ -3022,6 +3022,55 @@ def _append_gsc_snapshots(page_term: str, page_url: str, rows: list):
         print(f"[命中率核验] GSC 快照写回失败: {e}")
 
 
+def _hit_page_match_in(term: str, pages: list):
+    """命中率专用的严格页面匹配（比 find_matching_page 严格，避免误归因）：
+    - 规则 1：词 token 序列与页面 term token 序列互相包含（连续子序列）；
+    - 规则 2：词的最长 token（长度 >= 6 且不在通用词表）出现在 topic_url 的 slug 里。
+    反例：'flux-3-image-klein-comfy' 的核心 token 是 'image'（通用词），
+    不能因此匹配到 moss-image-pricing；'FLUX 3 Max Text to Video' 的
+    'video' 同理不能匹配到 ai-video-cost-calculator（计算器页的展现
+    是全站模型共用的，不能归因给单个视频模型）。
+    """
+    generic = {"image", "video", "audio", "model", "models", "free", "online",
+               "tool", "tools", "app", "generator", "editor", "chat", "music", "photo"}
+    low = _norm_term(term)
+    if not low:
+        return None
+    term_tokens = [t for t in re.split(r"[\s\-_]+", low) if t]
+
+    def contains_seq(hay, needle):
+        if not needle or len(needle) > len(hay):
+            return False
+        return any(hay[i:i + len(needle)] == needle for i in range(len(hay) - len(needle) + 1))
+
+    distinctive = [t for t in term_tokens if len(t) >= 6 and t not in generic]
+    core = max(distinctive, key=len) if distinctive else ""
+    for p in pages:
+        pterm = _norm_term(p.get("term") or "")
+        url = (p.get("topic_url") or "").strip().lower()
+        slug = url.rstrip("/").split("/")[-1] if url else ""
+        if not pterm and not slug:
+            continue
+        page_tokens = [t for t in re.split(r"[\s\-_]+", pterm) if t]
+        if page_tokens and (contains_seq(page_tokens, term_tokens) or contains_seq(term_tokens, page_tokens)):
+            return p
+        if core and core in slug:
+            return p
+    return None
+
+
+def _hit_page_match(term: str):
+    """从 page_tracking 里找命中率口径的页面（严格匹配），无匹配返回 None。"""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base_dir, "hidden_files", "page_tracking.json")
+        with open(path, encoding="utf-8") as f:
+            pages = json.load(f)
+    except Exception:
+        return None
+    return _hit_page_match_in(term, pages)
+
+
 def evaluate_tracking_hit(item: dict, now):
     """新命中定义（2026-10-27 用户定，旧 Google Trends 翻倍标准已废弃）：
     - 有上线页面（page_tracking 里有记录）：14 天内 GSC 展现数 >= 配置阈值
@@ -3034,7 +3083,7 @@ def evaluate_tracking_hit(item: dict, now):
     gsc_threshold = _CFG.get("gsc_hit_impressions_threshold") or 20
     multiple = _CFG.get("hit_heat_growth_multiplier") or 2.0
 
-    page = find_matching_page(item.get("term", ""))
+    page = _hit_page_match(item.get("term", ""))
     if page is not None:
         impressions = _stored_gsc_impressions_14d(page, now)
         fetched = False

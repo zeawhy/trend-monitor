@@ -62,11 +62,11 @@ class TestRecordDiscoveredTerms(unittest.TestCase):
 class TestHitRateNewDefinition(unittest.TestCase):
     def setUp(self):
         # 隔离 page 匹配：默认无页面，走热度分支
-        self._orig_find = tw.find_matching_page
-        tw.find_matching_page = lambda term: None
+        self._orig_find = tw._hit_page_match
+        tw._hit_page_match = lambda term: None
 
     def tearDown(self):
-        tw.find_matching_page = self._orig_find
+        tw._hit_page_match = self._orig_find
 
     def _run(self, data):
         d = tempfile.TemporaryDirectory()
@@ -112,7 +112,7 @@ class TestHitRateNewDefinition(unittest.TestCase):
         # 页面分支：mock GSC 存量快照，25 展现命中、5 展现未命中、无数据 pending
         orig_stored = tw._stored_gsc_impressions_14d
         orig_live = tw._live_gsc_page_daily
-        tw.find_matching_page = lambda term: {
+        tw._hit_page_match = lambda term: {
             "term": term, "topic_url": f"https://yuliuswiki.com/{term}"}
         impressions = {"hitpage": 25, "misspage": 5}
         tw._stored_gsc_impressions_14d = lambda page, now: impressions.get(page["term"])
@@ -162,3 +162,36 @@ class TestHitRateNewDefinition(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHitPageMatch(unittest.TestCase):
+    """命中率严格页面匹配：通用 token（image/video）不能造成跨主题误归因。"""
+    PAGES = [
+        {"term": "Moss Image Pricing", "topic_url": "https://yuliuswiki.com/moss-image-pricing"},
+        {"term": "AI video generation cost calculator", "topic_url": "https://www.yuliusbox.com/ai-video-cost-calculator"},
+        {"term": "FLUX 3 Max vs Seedance 2.5 vs MiniMax H3", "topic_url": "https://yuliuswiki.com/flux-3-max-vs-seedance-minimax-h3"},
+        {"term": "Kromoss", "topic_url": "https://yuliuswiki.com/kromoss-guide"},
+        {"term": "Ideogram Vector Guide", "topic_url": "https://yuliuswiki.com/ideogram-vector-guide"},
+    ]
+
+    def test_no_false_positive_generic_token(self):
+        # 'image' 是通用词，不能把 Klein 归因到 Moss 定价页
+        self.assertIsNone(tw._hit_page_match_in("flux-3-image-klein-comfy", self.PAGES))
+        # 'video' 是通用词，不能把视频模型归因到计算器页
+        self.assertIsNone(tw._hit_page_match_in("FLUX 3 Max Text to Video", self.PAGES))
+        self.assertIsNone(tw._hit_page_match_in("Eden Live 5B Video", self.PAGES))
+
+    def test_true_matches(self):
+        self.assertEqual(
+            tw._hit_page_match_in("Moss Image", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/moss-image-pricing")
+        self.assertEqual(
+            tw._hit_page_match_in("Ideogram Vector", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/ideogram-vector-guide")
+        self.assertEqual(
+            tw._hit_page_match_in("Kromoss", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/kromoss-guide")
+        # 'minimax' 是 distinctive token（7 字符、非通用），可匹配同厂商对比文
+        self.assertEqual(
+            tw._hit_page_match_in("MiniMax-M3.1-Flash", self.PAGES)["topic_url"],
+            "https://yuliuswiki.com/flux-3-max-vs-seedance-minimax-h3")
